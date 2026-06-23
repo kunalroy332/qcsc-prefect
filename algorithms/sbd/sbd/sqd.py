@@ -184,12 +184,71 @@ def walker_sqd(
         hamming_right=elec_props.num_electrons[0],
         hamming_left=elec_props.num_electrons[1],
     )
+    norb = elec_props.num_orbitals
+    if elec_props.unrestricted:
+        # Carryover crossing the optimizer boundary is a single 2*norb-wide bool array using the
+        # same (beta-left, alpha-right) layout as the sampled bitstrings. Split it per spin.
+        carryover_b = carryover[:, :norb]
+        carryover_a = carryover[:, norb:] if carryover.shape[1] >= 2 * norb else carryover[:, :norb]
+        ci_a, ci_b = subsample_open_shell(
+            bitstring_matrix=bitstrings_post,
+            probabilities=probs_post,
+            carryover_a=carryover_a,
+            carryover_b=carryover_b,
+            subspace_dim=sqd_dim,
+            norb=norb,
+            num_elec_a=elec_props.num_electrons[0],
+            num_elec_b=elec_props.num_electrons[1],
+        )
+        sbd_result = asyncio.run(
+            davidson_solver.run(
+                ci_strings=(ci_a, ci_b),
+                one_body_tensor=elec_props.one_body_tensor,
+                two_body_tensor=elec_props.two_body_tensor,
+                norb=norb,
+                nelec=elec_props.num_electrons,
+                one_body_tensor_b=elec_props.one_body_tensor_b,
+                two_body_tensor_ab=elec_props.two_body_tensor_ab,
+                two_body_tensor_bb=elec_props.two_body_tensor_bb,
+            )
+        )
+        logger.debug("Completed diagonalization.")
+        energy = sbd_result.energy + elec_props.nuclear_repulsion_energy
+
+        # Recombine per-spin carryover into a 2*norb-wide array (beta-left, alpha-right) for the
+        # next optimizer iteration. Pad to equal row counts since alpha/beta carryover may differ.
+        next_carryover = _stack_spin_carryover(
+            carryover_a=sbd_result.carryover_bitstrings,
+            carryover_b=sbd_result.carryover_bitstrings_b,
+            norb=norb,
+        )
+        report_s3 = save_ndarray(
+            file_prefix="sqd_data",
+            ucj_parameter=ucj_parameter,
+            raw_bitstrings=raw_bitstrings,
+            recovered_bitstrings=bitstrings,
+            alphadets=ci_a,
+            betadets=ci_b,
+            avg_occupancy=sbd_result.orbital_occupancies[0],
+            avg_occupancy_b=sbd_result.orbital_occupancies[1],
+            carryover=next_carryover,
+        )
+        logger.debug(f"Saved SQD data in '{report_s3}'.")
+        telemetry.update(
+            num_post_determinants=len(bitstrings_post),
+            net_subspace_dim=int(len(ci_a) * len(ci_b)),
+            energy=float(energy),
+            sqd_data=str(report_s3),
+            last_updated=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        )
+        return ((energy, next_carryover), telemetry)
+
     ci_strings = subsample_close_shell(
         bitstring_matrix=bitstrings_post,
         probabilities=probs_post,
         carryover=carryover,
         subspace_dim=sqd_dim,
-        norb=elec_props.num_orbitals,
+        norb=norb,
         num_elec_a=elec_props.num_electrons[0],
     )
     # Run SBD immediately
@@ -198,7 +257,7 @@ def walker_sqd(
             ci_strings=(ci_strings, ci_strings),
             one_body_tensor=elec_props.one_body_tensor,
             two_body_tensor=elec_props.two_body_tensor,
-            norb=elec_props.num_orbitals,
+            norb=norb,
             nelec=elec_props.num_electrons,
         )
     )
@@ -225,6 +284,25 @@ def walker_sqd(
     )
 
     return ((energy, sbd_result.carryover_bitstrings), telemetry)
+
+
+def _stack_spin_carryover(
+    carryover_a: NpStrict2DArrayBool,
+    carryover_b: NpStrict2DArrayBool | None,
+    norb: int,
+) -> NpStrict2DArrayBool:
+    """Combine per-spin carryover into one (beta-left, alpha-right) 2*norb-wide bool array.
+
+    Alpha and beta carryover sets can differ in length; the shorter one is zero-padded so the two
+    halves line up row-wise. This mirrors the sampled-bitstring layout consumed on the next pass.
+    """
+    if carryover_b is None:
+        carryover_b = np.empty((0, norb), dtype=bool)
+    n = max(carryover_a.shape[0], carryover_b.shape[0])
+    out = np.zeros((n, 2 * norb), dtype=bool)
+    out[: carryover_b.shape[0], :norb] = carryover_b
+    out[: carryover_a.shape[0], norb:] = carryover_a
+    return out
 
 
 @task
@@ -310,6 +388,111 @@ def subsample_close_shell(
         new_strings = ci_strs_unique[non_hf_mask]
 
     # Carryover bitstrings are always included
+    return np.concatenate(([hartreefock], ci_strs_carryover, new_strings), dtype=np.longlong)
+
+
+@task
+def subsample_open_shell(
+    bitstring_matrix: NpStrict2DArrayBool,
+    probabilities: NpStrict1DArrayF64,
+    carryover_a: NpStrict2DArrayBool,
+    carryover_b: NpStrict2DArrayBool,
+    subspace_dim: int,
+    norb: int,
+    num_elec_a: int,
+    num_elec_b: int,
+) -> tuple[NpStrict1DArrayLL, NpStrict1DArrayLL]:
+    """Build separate alpha and beta CI string lists from bitstrings (open-shell / UHF).
+
+    Unlike :func:`subsample_close_shell` (which averages and dedups across both spin halves of a
+    single bitstring matrix and returns one alpha list), this keeps the alpha and beta pools fully
+    independent: each spin gets its own deduplication, its own Hartree-Fock string at index 0, and
+    its own carryover determinants. Returns the pair ``(ci_strs_a, ci_strs_b)`` consumed by the
+    UHF SBD solver as distinct AlphaDets/BetaDets.
+
+    The input bitstring layout matches the close-shell routine: ``bitstring_matrix[:, :norb]`` is
+    the beta (left) half and ``bitstring_matrix[:, norb:]`` is the alpha (right) half.
+    """
+    # Assume longlong is 64 bit integer. Bit at index > 64 overflows.
+    assert norb < 64
+
+    num_configs = bitstring_matrix.shape[0]
+
+    ci_strs_a = np.zeros(num_configs, dtype=np.longlong)
+    ci_strs_b = np.zeros(num_configs, dtype=np.longlong)
+    for i in range(norb):
+        ci_strs_b[:] += bitstring_matrix[:, i] * 2 ** (norb - 1 - i)
+        ci_strs_a[:] += bitstring_matrix[:, norb + i] * 2 ** (norb - 1 - i)
+
+    ci_a = _subsample_one_spin(
+        ci_strs=ci_strs_a,
+        probabilities=probabilities,
+        carryover=carryover_a,
+        subspace_dim=subspace_dim,
+        norb=norb,
+        num_elec=num_elec_a,
+    )
+    ci_b = _subsample_one_spin(
+        ci_strs=ci_strs_b,
+        probabilities=probabilities,
+        carryover=carryover_b,
+        subspace_dim=subspace_dim,
+        norb=norb,
+        num_elec=num_elec_b,
+    )
+    return ci_a, ci_b
+
+
+def _subsample_one_spin(
+    ci_strs: NpStrict1DArrayLL,
+    probabilities: NpStrict1DArrayF64,
+    carryover: NpStrict2DArrayBool,
+    subspace_dim: int,
+    norb: int,
+    num_elec: int,
+) -> NpStrict1DArrayLL:
+    """Dedup + carryover + HF-at-index-0 for a single spin channel.
+
+    Mirrors the per-spin logic of :func:`subsample_close_shell` but operates on one spin's CI
+    string integers and its own electron count and carryover, without averaging across spins.
+    """
+    global MODULE_RNG
+
+    num_carryover = carryover.shape[0]
+
+    # Hartree-Fock string for this spin, e.g. '0000011111' for num_elec=5.
+    hartreefock = (1 << num_elec) - 1
+
+    ci_strs_carryover = np.zeros(num_carryover, dtype=np.longlong)
+    for i in range(norb):
+        ci_strs_carryover[:] += carryover[:, i] * 2 ** (norb - 1 - i)
+
+    ci_strs_unique, ci_probs_unique = _deduplicate_and_accumurate_probs(
+        ci_strings=ci_strs,
+        probabilities=probabilities,
+    )
+
+    # Remove HF string to make sure it appears at index 0.
+    non_hf_mask = ci_strs_unique != hartreefock
+    ci_strs_carryover = ci_strs_carryover[ci_strs_carryover != hartreefock]
+
+    num_new_samples = int(np.sqrt(subspace_dim)) - len(ci_strs_carryover) - 1
+    if len(ci_strs_unique) > num_new_samples:
+        # Choose bitstrings not included in carryover bitstrings; preserve subspace dimension.
+        non_co_mask = ~np.isin(ci_strs_unique, ci_strs_carryover)
+        mask = non_hf_mask & non_co_mask
+        ci_strs_unique = ci_strs_unique[mask]
+        ci_probs_unique = ci_probs_unique[mask]
+        new_strings = MODULE_RNG.choice(
+            ci_strs_unique,
+            size=num_new_samples,
+            replace=False,
+            p=ci_probs_unique / ci_probs_unique.sum(),
+        )
+    else:
+        new_strings = ci_strs_unique[non_hf_mask]
+
+    # Carryover bitstrings are always included; HF is forced to index 0.
     return np.concatenate(([hartreefock], ci_strs_carryover, new_strings), dtype=np.longlong)
 
 
