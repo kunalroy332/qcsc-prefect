@@ -78,6 +78,26 @@ Set the absolute path to this executable in the SBD block configuration file:
 sbd_executable = "/abs/path/to/qcsc-prefect/algorithms/sbd/native/diag"
 ```
 
+## Building the UHF (open-shell) Executable
+
+All three build scripts accept `UHF=1`, which appends `-D_UHF` and emits a separate `diag_uhf`
+(`diag-gpu_uhf` for the GPU script) binary, leaving the restricted `diag` target untouched. The
+`-D_UHF` build switches the integral container and FCIDUMP parser to the spin-resolved
+(interleaved spin-orbital) layout and reads a beta determinant list distinct from alpha.
+
+Build both restricted and unrestricted binaries side by side, e.g. on Fugaku:
+
+```bash
+bash ./build_sbd_fugaku.sh           # -> diag      (restricted, unchanged)
+UHF=1 bash ./build_sbd_fugaku.sh     # -> diag_uhf  (unrestricted / open-shell)
+```
+
+The UHF binary additionally accepts `--adetfile` / `--bdetfile` to load separate alpha and beta
+determinant files and writes a `carryover_b.bin` alongside `carryover.bin`. Without `--bdetfile`
+it falls back to `bdet = adet` (identical to the restricted binary). Register the UHF path under a
+distinct executable key (`sbd_diag_uhf`) so RHF and UHF blocks can coexist; the `SBDSolverJob`
+selects it when `method="uhf"`.
+
 ### Optional environment overrides
 
 You can override upstream repository location:

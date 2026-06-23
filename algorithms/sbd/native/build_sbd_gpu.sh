@@ -11,6 +11,15 @@ CCCOM="${CCCOM:-mpic++}"
 CCFLAGS="${CCFLAGS:--std=c++17 -mp -cuda -fast -gpu=mem:unified -DSBD_THRUST}"
 SYSLIB="${SYSLIB:--lblas -llapack}"
 
+# UHF=1 builds the unrestricted GPU binary diag-gpu_uhf (adds -D_UHF on top of -DSBD_THRUST,
+# which selects the _UHF path in integrals_thrust.h); otherwise the restricted diag-gpu.
+if [ "${UHF:-0}" = "1" ]; then
+    CCFLAGS="$CCFLAGS -D_UHF"
+    OUTBIN="diag-gpu_uhf"
+else
+    OUTBIN="diag-gpu"
+fi
+
 if ! command -v "$CCCOM" >/dev/null 2>&1; then
     echo "Compiler '$CCCOM' not found in PATH. Load the Miyabi-G compiler/MPI environment first." >&2
     exit 1
@@ -23,13 +32,13 @@ else
     echo "SBD repo already exists: $SBD_DIR"
 fi
 
-# Clean previous build
-rm -f "$SCRIPT_DIR"/*.o "$SCRIPT_DIR"/diag-gpu
+# Clean previous build artifacts for this target only.
+rm -f "$SCRIPT_DIR"/*.o "$SCRIPT_DIR/$OUTBIN"
 
 # Compile and link
 echo "$CCCOM $CCFLAGS -c main.cc -o main.o -I$SBD_DIR/include"
 $CCCOM $CCFLAGS -c main.cc -o main.o -I"$SBD_DIR/include"
-echo "$CCCOM $CCFLAGS $SYSLIB -o diag-gpu main.o"
-$CCCOM $CCFLAGS $SYSLIB -o diag-gpu main.o
+echo "$CCCOM $CCFLAGS $SYSLIB -o $OUTBIN main.o"
+$CCCOM $CCFLAGS $SYSLIB -o "$OUTBIN" main.o
 
-echo "Build completed: $SCRIPT_DIR/diag-gpu"
+echo "Build completed: $SCRIPT_DIR/$OUTBIN"
