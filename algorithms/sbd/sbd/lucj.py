@@ -14,6 +14,14 @@ from qiskit.circuit import ClassicalRegister, QuantumCircuit, QuantumRegister
 MODULE_RNG = np.random.default_rng(seed=4520)
 
 
+def _default_bb_indices(
+    aa_indices: list[tuple[int, int]],
+    bb_indices: list[tuple[int, int]] | None,
+) -> list[tuple[int, int]]:
+    """Beta-beta interaction pairs default to the same orbital topology as alpha-alpha."""
+    return aa_indices if bb_indices is None else bb_indices
+
+
 @task
 def initialize_ucj_parameters(
     elec_props: ElectronicProperties,
@@ -22,9 +30,20 @@ def initialize_ucj_parameters(
     num_walkers: int,
     randomization_factor: float,
     n_lucj_layers: int,
+    bb_indices: list[tuple[int, int]] | None = None,
 ) -> NpStrict2DArrayF64:
-    assert not elec_props.open_shell
     global MODULE_RNG
+
+    if elec_props.unrestricted:
+        return _initialize_ucj_parameters_uhf(
+            elec_props=elec_props,
+            aa_indices=aa_indices,
+            ab_indices=ab_indices,
+            bb_indices=_default_bb_indices(aa_indices, bb_indices),
+            num_walkers=num_walkers,
+            randomization_factor=randomization_factor,
+            n_lucj_layers=n_lucj_layers,
+        )
 
     def _t2_to_ucj_parameters(t2: NpStrict4DArrayF64) -> NpStrict1DArrayF64:
         nonlocal aa_indices
@@ -54,6 +73,54 @@ def initialize_ucj_parameters(
     return initial_params
 
 
+def _initialize_ucj_parameters_uhf(
+    elec_props: ElectronicProperties,
+    aa_indices: list[tuple[int, int]],
+    ab_indices: list[tuple[int, int]],
+    bb_indices: list[tuple[int, int]],
+    num_walkers: int,
+    randomization_factor: float,
+    n_lucj_layers: int,
+) -> NpStrict2DArrayF64:
+    """Spin-unbalanced (UHF) counterpart of :func:`initialize_ucj_parameters`.
+
+    The UCCSD t2 tuple ``(t2aa, t2ab, t2bb)`` lives across ``elec_props.t2`` / ``.t2_ab`` /
+    ``.t2_bb``; interaction pairs become a 3-tuple ``(aa, ab, bb)``. Randomization perturbs all
+    three blocks independently (they have different shapes).
+    """
+    global MODULE_RNG
+    interaction_pairs = (aa_indices, ab_indices, bb_indices)
+
+    def _t2_to_ucj_parameters(
+        t2: tuple[NpStrict4DArrayF64, NpStrict4DArrayF64, NpStrict4DArrayF64],
+    ) -> NpStrict1DArrayF64:
+        tmp_operator = ffsim.UCJOpSpinUnbalanced.from_t_amplitudes(
+            t2=t2,
+            n_reps=n_lucj_layers + 1,
+            interaction_pairs=interaction_pairs,
+        )
+        truncated_ucj_op = ffsim.UCJOpSpinUnbalanced(
+            diag_coulomb_mats=tmp_operator.diag_coulomb_mats[:-1],
+            orbital_rotations=tmp_operator.orbital_rotations[:-1],
+            final_orbital_rotation=tmp_operator.orbital_rotations[-1],
+        )
+        return truncated_ucj_op.to_parameters(interaction_pairs=interaction_pairs)
+
+    t2_tuple = (elec_props.t2, elec_props.t2_ab, elec_props.t2_bb)
+
+    # First walker is the bare UCCSD parameters
+    initial_params = [_t2_to_ucj_parameters(t2=t2_tuple)]
+
+    # The rest of walkers are randomized parameters; perturb each spin block independently.
+    for _ in range(num_walkers - 1):
+        drifted = tuple(
+            block + randomization_factor * (MODULE_RNG.random(block.shape) - 0.5)
+            for block in t2_tuple
+        )
+        initial_params.append(_t2_to_ucj_parameters(t2=drifted))
+    return initial_params
+
+
 @task
 def create_lucj_circuit(
     ucj_parameter: NpStrict1DArrayF64,
@@ -62,9 +129,8 @@ def create_lucj_circuit(
     ab_indices: list[tuple[int, int]],
     n_lucj_layers: int,
     use_reset_mitigation: bool,
+    bb_indices: list[tuple[int, int]] | None = None,
 ) -> QuantumCircuit:
-    assert not elec_props.open_shell
-
     qreg = QuantumRegister(2 * elec_props.num_orbitals, name="q")
     creg_test = ClassicalRegister(2 * elec_props.num_orbitals, name="test")
     creg_meas = ClassicalRegister(2 * elec_props.num_orbitals, name="meas")
@@ -84,18 +150,30 @@ def create_lucj_circuit(
         ),
         qargs=qreg,
     )
-    ucj_op = ffsim.UCJOpSpinBalanced.from_parameters(
-        params=ucj_parameter,
-        norb=elec_props.num_orbitals,
-        n_reps=n_lucj_layers,
-        interaction_pairs=(aa_indices, ab_indices),
-        with_final_orbital_rotation=True,
-    )
-    circ.append(
-        ffsim.qiskit.UCJOpSpinBalancedJW(
-            ucj_op=ucj_op,
-        ),
-        qargs=qreg,
-    )
+    if elec_props.unrestricted:
+        interaction_pairs = (aa_indices, ab_indices, _default_bb_indices(aa_indices, bb_indices))
+        ucj_op = ffsim.UCJOpSpinUnbalanced.from_parameters(
+            params=ucj_parameter,
+            norb=elec_props.num_orbitals,
+            n_reps=n_lucj_layers,
+            interaction_pairs=interaction_pairs,
+            with_final_orbital_rotation=True,
+        )
+        circ.append(
+            ffsim.qiskit.UCJOpSpinUnbalancedJW(ucj_op=ucj_op),
+            qargs=qreg,
+        )
+    else:
+        ucj_op = ffsim.UCJOpSpinBalanced.from_parameters(
+            params=ucj_parameter,
+            norb=elec_props.num_orbitals,
+            n_reps=n_lucj_layers,
+            interaction_pairs=(aa_indices, ab_indices),
+            with_final_orbital_rotation=True,
+        )
+        circ.append(
+            ffsim.qiskit.UCJOpSpinBalancedJW(ucj_op=ucj_op),
+            qargs=qreg,
+        )
     circ.measure(qreg, creg_meas)
     return circ
