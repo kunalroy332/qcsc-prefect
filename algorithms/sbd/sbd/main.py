@@ -134,8 +134,14 @@ def riken_sqd_de(
         description="SQD intermediate data.",
     )
 
+    # The solver block is the single source of truth for RHF vs UHF; drive the classical
+    # integral computation (and the rest of the open-shell pipeline) from solver.method.
+    unrestricted = getattr(solver, "method", "rhf") == "uhf"
+    logger.info("Electronic-structure method: %s", "uhf" if unrestricted else "rhf")
+
     elec_props = compute_molecular_integrals_from_fcidump(
         fcidump_file=parameters.fcidump,
+        unrestricted=unrestricted,
     )
 
     # We assume heavy-hex topology

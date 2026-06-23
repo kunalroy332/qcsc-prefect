@@ -61,6 +61,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--queue")
     parser.add_argument("--work-dir")
     parser.add_argument("--sbd-executable")
+    parser.add_argument(
+        "--sbd-executable-uhf",
+        help="Path to the UHF (open-shell) diag_uhf binary. Required when --method uhf.",
+    )
 
     parser.add_argument("--launcher")
     parser.add_argument("--walltime")
@@ -91,7 +95,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--iteration", type=int)
     parser.add_argument("--tolerance", type=float)
     parser.add_argument("--carryover-ratio", type=float)
-    parser.add_argument("--solver-mode", choices=["cpu", "gpu"])
+    parser.add_argument("--solver-mode", choices=["cpu", "gpu", "fugaku"])
+    parser.add_argument("--method", choices=["rhf", "uhf"])
     parser.add_argument("--shots", type=int)
     parser.add_argument(
         "--sqd-options-json",
@@ -211,6 +216,7 @@ def _env_values() -> dict[str, Any]:
         "queue": env_first_str("SBD_QUEUE", "MIYABI_PBS_QUEUE", "FUGAKU_RSCGRP"),
         "work_dir": env_first_str("SBD_WORK_DIR"),
         "sbd_executable": env_first_str("SBD_EXECUTABLE"),
+        "sbd_executable_uhf": env_first_str("SBD_EXECUTABLE_UHF"),
         "launcher": env_first_str("SBD_LAUNCHER", "MIYABI_LAUNCHER", "FUGAKU_LAUNCHER"),
         "walltime": env_first_str("SBD_WALLTIME", "MIYABI_WALLTIME", "FUGAKU_WALLTIME"),
         "num_nodes": env_first_int("SBD_NUM_NODES", "MIYABI_NUM_NODES", "FUGAKU_NUM_NODES"),
@@ -237,6 +243,7 @@ def _env_values() -> dict[str, Any]:
         "tolerance": env_float("SBD_TOLERANCE"),
         "carryover_ratio": env_float("SBD_CARRYOVER_RATIO"),
         "solver_mode": env_first_str("SBD_SOLVER_MODE"),
+        "method": env_first_str("SBD_METHOD"),
         "shots": env_int("SBD_SHOTS"),
         "sqd_options_json": env_first_str("SBD_OPTIONS_JSON"),
     }
@@ -308,6 +315,12 @@ def main() -> None:
     )
     if not sbd_executable:
         raise RuntimeError("Set 'sbd_executable' in --config, --sbd-executable, or SBD_EXECUTABLE.")
+
+    sbd_executable_uhf = _pick_value(
+        args.sbd_executable_uhf,
+        config.get("sbd_executable_uhf"),
+        env.get("sbd_executable_uhf"),
+    )
 
     launcher_default = "mpiexec.hydra" if is_miyabi else "mpiexec"
     launcher = str(
@@ -383,6 +396,9 @@ def main() -> None:
     )
     solver_mode = str(
         _pick_value(args.solver_mode, config.get("solver_mode"), env.get("solver_mode"), "cpu")
+    ).strip()
+    method = str(
+        _pick_value(args.method, config.get("method"), env.get("method"), "rhf")
     ).strip()
     resource_class = "gpu" if solver_mode == "gpu" else "cpu"
     user_args = _normalize_str_list(config.get("user_args")) or []
@@ -465,9 +481,22 @@ def main() -> None:
         args.sqd_options_json, config.get("sqd_options_json"), env.get("sqd_options_json")
     )
 
+    # Derive executable keys from backend x method, matching SBDSolverJob._executable_key:
+    # sbd_diag (cpu/fugaku+rhf), sbd_diag_gpu, sbd_diag_uhf, sbd_diag_gpu_uhf.
+    backend_suffix = "_gpu" if solver_mode == "gpu" else ""
+    rhf_key = f"sbd_diag{backend_suffix}"
+    uhf_key = f"sbd_diag{backend_suffix}_uhf"
+    active_key = uhf_key if method == "uhf" else rhf_key
+
+    if method == "uhf" and not sbd_executable_uhf:
+        raise RuntimeError(
+            "method='uhf' requires the UHF binary path: set 'sbd_executable_uhf' in --config, "
+            "--sbd-executable-uhf, or SBD_EXECUTABLE_UHF (build it with `UHF=1 ./build_sbd_*.sh`)."
+        )
+
     CommandBlock(
         command_name="sbd-diag",
-        executable_key="sbd_diag",
+        executable_key=active_key,
         description="SBD diagonalization executable",
         default_args=[],
     ).save(command_block_name, overwrite=True)
@@ -489,6 +518,12 @@ def main() -> None:
 
     executable_path = str(Path(str(sbd_executable)).expanduser().resolve())
 
+    # Register both the RHF and (when provided) the UHF binary so RHF and UHF solver blocks can
+    # share one HPC profile. The active CommandBlock picks one via its executable_key.
+    executable_map = {rhf_key: executable_path}
+    if sbd_executable_uhf:
+        executable_map[uhf_key] = str(Path(str(sbd_executable_uhf)).expanduser().resolve())
+
     if is_miyabi:
         HPCProfileBlock(
             hpc_target="miyabi",
@@ -496,7 +531,7 @@ def main() -> None:
             queue_gpu="regular-g",
             project_cpu=str(project),
             project_gpu=str(project),
-            executable_map={"sbd_diag": executable_path},
+            executable_map=executable_map,
         ).save(hpc_profile_block_name, overwrite=True)
     else:
         HPCProfileBlock(
@@ -505,7 +540,7 @@ def main() -> None:
             queue_gpu=str(queue),
             project_cpu=str(project),
             project_gpu=str(project),
-            executable_map={"sbd_diag": executable_path},
+            executable_map=executable_map,
             gfscache=fugaku_gfscache or None,
             spack_modules=fugaku_spack_modules or [],
             mpi_options_for_pjm=fugaku_mpi_options_for_pjm or [],
@@ -526,6 +561,7 @@ def main() -> None:
         tolerance=tolerance,
         carryover_ratio=carryover_ratio,
         solver_mode=solver_mode,
+        method=method,
         user_args=user_args,
     ).save(solver_block_name, overwrite=True)
 
@@ -542,7 +578,10 @@ def main() -> None:
     print(f"  HPC profile block: {hpc_profile_block_name}")
     print(f"  Options variable: {options_variable_name}")
     print(f"  Work directory: {Path(str(work_dir)).expanduser().resolve()}")
+    print(f"  Method: {method}")
     print(f"  SBD executable: {Path(str(sbd_executable)).expanduser().resolve()}")
+    if sbd_executable_uhf:
+        print(f"  SBD UHF executable: {Path(str(sbd_executable_uhf)).expanduser().resolve()}")
     print(f"  Script filename: {script_filename}")
     print(f"  Metrics artifact key: {metrics_artifact_key}")
 
