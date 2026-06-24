@@ -312,6 +312,22 @@ def selection(
     logger = get_run_logger()
 
     new_state = current_state.copy()
+
+    # The population array is pre-allocated from the spin-balanced (RHF) parameter count in
+    # OptimizerState.from_parameters. The spin-unbalanced (UHF) UCJ operator has more parameters
+    # (separate alpha/beta orbital rotations plus a beta-beta block), so the actual per-walker
+    # vector is longer. Re-size the (still-uninitialized, all-NaN) population array to match the
+    # real trial-parameter width the first time we see it; for RHF the widths already agree so
+    # this is a no-op, and on later iterations the array holds real data and is left untouched.
+    trial_width = int(np.asarray(trial_populations[0]).shape[0])
+    if (
+        new_state.populations.shape[1] != trial_width
+        and np.all(np.isnan(new_state.populations))
+    ):
+        new_state.populations = np.full(
+            (new_state.populations.shape[0], trial_width), np.nan, dtype=np.float64
+        )
+
     best_index = int(np.nanargmin(trial_energies))
     if (
         current_state.best_energy() is None
