@@ -161,11 +161,14 @@ def _build_property_uhf(
     mycc.kernel()
     t2_aa, t2_ab, t2_bb = mycc.t2
 
-    # Diagonalize each spin's 1-RDM to obtain per-spin occupancies (natural orbital occupations).
-    # UHF make_rdm1() returns (dm_alpha, dm_beta); each spin holds at most 1.0 per orbital.
-    dm_a, dm_b = mf.make_rdm1()
-    occ_a, _ = scipy.linalg.eigh(dm_a)
-    occ_b, _ = scipy.linalg.eigh(dm_b)
+    # Per-spin natural-orbital occupancies from the *correlated* UCCSD 1-RDM (in MO basis).
+    # These must be fractional: configuration recovery downstream uses them to bias sampled
+    # bitstrings toward the physically important (near-HF) configurations. The UHF *SCF* RDM is
+    # (often) idempotent -> integer 0/1 occupancies, which give recovery no signal and collapse
+    # the SQD subspace to bare Hartree-Fock. UCCSD make_rdm1() returns (dm_a, dm_b) in MO basis.
+    dm_cc_a, dm_cc_b = mycc.make_rdm1()
+    occ_a, _ = scipy.linalg.eigh(dm_cc_a)
+    occ_b, _ = scipy.linalg.eigh(dm_cc_b)
 
     # Get PySCF logs dumped into in-memory buffer
     get_run_logger().info(buf.getvalue())
