@@ -121,6 +121,19 @@ class FlowParameters(BaseModel):
         ge=1,
     )
 
+    n_recovery_steps: int = Field(
+        default=1,
+        description=(
+            "Number of SQD self-consistency configuration-recovery passes per walker. "
+            "Each pass re-runs configuration recovery (from the same quantum samples) using "
+            "the orbital occupancies from the previous pass's diagonalization, then "
+            "re-subsamples and re-diagonalizes. 1 = single pass (no self-consistency); "
+            "3-5 is the canonical SQD recovery loop."
+        ),
+        title="SQD Recovery Steps",
+        ge=1,
+    )
+
     quantum_source: Literal["real-device", "random"] = Field(
         default="real-device",
         description=(

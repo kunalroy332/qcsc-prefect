@@ -236,6 +236,7 @@ def differential_evolution_trial(
             solver_block_name=solver_block_name,
             quantum_source=parameters.quantum_source,
             random_seed=parameters.random_seed,
+            n_recovery_steps=parameters.n_recovery_steps,
         )
         futs.append(prefect_fut)
 

@@ -26,7 +26,7 @@ from .np_type_extension import (
     NpStrict1DArrayLL,
     NpStrict2DArrayBool,
 )
-from .solver_job import SBDResult, SBDSolverJob
+from .solver_job import SBDSolverJob
 from .transpile_custom import find_optimal_layout, transpile_circuit
 
 # Convert Addon function into Prefect Task
@@ -51,6 +51,7 @@ def walker_sqd(
     solver_block_name: str,
     quantum_source: str,
     random_seed: int,
+    n_recovery_steps: int = 1,
 ) -> tuple[tuple[float, NpStrict2DArrayBool], dict[str, Any]]:
     logger = get_run_logger()
     davidson_solver = SBDSolverJob.load(solver_block_name)
@@ -170,120 +171,144 @@ def walker_sqd(
 
     logger.debug("Starting configuration recovery and diagonalization.")
     raw_bitstrings, raw_probs = bit_array_to_arrays(bit_array)
-    bitstrings, probs = recover_configurations(
-        bitstring_matrix=raw_bitstrings,
-        probabilities=raw_probs,
-        avg_occupancies=elec_props.initial_occupancy,
-        num_elec_a=elec_props.num_electrons[0],
-        num_elec_b=elec_props.num_electrons[1],
-        rand_seed=MODULE_RNG,
-    )
-    bitstrings_post, probs_post = postselect_bitstrings(
-        bitstring_matrix=bitstrings,
-        probabilities=probs,
-        hamming_right=elec_props.num_electrons[0],
-        hamming_left=elec_props.num_electrons[1],
-    )
     norb = elec_props.num_orbitals
-    if elec_props.unrestricted:
-        # Carryover crossing the optimizer boundary is a single 2*norb-wide bool array using the
-        # same (beta-left, alpha-right) layout as the sampled bitstrings. Split it per spin.
-        carryover_b = carryover[:, :norb]
-        carryover_a = carryover[:, norb:] if carryover.shape[1] >= 2 * norb else carryover[:, :norb]
-        ci_a, ci_b = subsample_open_shell(
-            bitstring_matrix=bitstrings_post,
-            probabilities=probs_post,
-            carryover_a=carryover_a,
-            carryover_b=carryover_b,
-            subspace_dim=sqd_dim,
-            norb=norb,
-            num_elec_a=elec_props.num_electrons[0],
-            num_elec_b=elec_props.num_electrons[1],
-        )
-        sbd_result = asyncio.run(
-            davidson_solver.run(
-                ci_strings=(ci_a, ci_b),
-                one_body_tensor=elec_props.one_body_tensor,
-                two_body_tensor=elec_props.two_body_tensor,
-                norb=norb,
-                nelec=elec_props.num_electrons,
-                one_body_tensor_b=elec_props.one_body_tensor_b,
-                two_body_tensor_ab=elec_props.two_body_tensor_ab,
-                two_body_tensor_bb=elec_props.two_body_tensor_bb,
-            )
-        )
-        logger.debug("Completed diagonalization.")
-        energy = sbd_result.energy + elec_props.nuclear_repulsion_energy
+    num_elec_a, num_elec_b = elec_props.num_electrons
 
-        # Recombine per-spin carryover into a 2*norb-wide array (beta-left, alpha-right) for the
-        # next optimizer iteration. Pad to equal row counts since alpha/beta carryover may differ.
-        next_carryover = _stack_spin_carryover(
-            carryover_a=sbd_result.carryover_bitstrings,
-            carryover_b=sbd_result.carryover_bitstrings_b,
-            norb=norb,
+    # SQD self-consistency configuration-recovery loop.
+    #
+    # Canonical SQD iterates: recover configurations using the current average orbital
+    # occupancies -> postselect -> subsample -> exactly diagonalize the subspace -> read updated
+    # occupancies from the solver -> recover again. Recovery always re-uses the SAME raw quantum
+    # samples (no re-sampling of the device); only the occupancies, and hence the recovered/
+    # subsampled subspace, evolve. We keep the best (lowest-energy) pass.
+    #
+    # avg_occ starts from the CCSD natural-orbital occupancies (per-spin for UHF) and is refreshed
+    # each pass from the SBD solver's orbital_occupancies. n_recovery_steps=1 reproduces the
+    # previous single-pass behavior exactly.
+    avg_occ = elec_props.initial_occupancy
+
+    best_energy: float | None = None
+    best_carryover: NpStrict2DArrayBool | None = None
+    best_report_s3: str | None = None
+    best_num_post = 0
+    best_net_dim = 0
+
+    for recovery_step in range(n_recovery_steps):
+        bitstrings, probs = recover_configurations(
+            bitstring_matrix=raw_bitstrings,
+            probabilities=raw_probs,
+            avg_occupancies=avg_occ,
+            num_elec_a=num_elec_a,
+            num_elec_b=num_elec_b,
+            rand_seed=MODULE_RNG,
         )
+        bitstrings_post, probs_post = postselect_bitstrings(
+            bitstring_matrix=bitstrings,
+            probabilities=probs,
+            hamming_right=num_elec_a,
+            hamming_left=num_elec_b,
+        )
+
+        if elec_props.unrestricted:
+            # Carryover crossing the optimizer boundary is a single 2*norb-wide bool array using
+            # the same (beta-left, alpha-right) layout as the sampled bitstrings. Split it per spin.
+            carryover_b = carryover[:, :norb]
+            carryover_a = (
+                carryover[:, norb:] if carryover.shape[1] >= 2 * norb else carryover[:, :norb]
+            )
+            ci_a, ci_b = subsample_open_shell(
+                bitstring_matrix=bitstrings_post,
+                probabilities=probs_post,
+                carryover_a=carryover_a,
+                carryover_b=carryover_b,
+                subspace_dim=sqd_dim,
+                norb=norb,
+                num_elec_a=num_elec_a,
+                num_elec_b=num_elec_b,
+            )
+            sbd_result = asyncio.run(
+                davidson_solver.run(
+                    ci_strings=(ci_a, ci_b),
+                    one_body_tensor=elec_props.one_body_tensor,
+                    two_body_tensor=elec_props.two_body_tensor,
+                    norb=norb,
+                    nelec=elec_props.num_electrons,
+                    one_body_tensor_b=elec_props.one_body_tensor_b,
+                    two_body_tensor_ab=elec_props.two_body_tensor_ab,
+                    two_body_tensor_bb=elec_props.two_body_tensor_bb,
+                )
+            )
+            step_carryover = _stack_spin_carryover(
+                carryover_a=sbd_result.carryover_bitstrings,
+                carryover_b=sbd_result.carryover_bitstrings_b,
+                norb=norb,
+            )
+            net_dim = int(len(ci_a) * len(ci_b))
+            save_kwargs = dict(alphadets=ci_a, betadets=ci_b)
+        else:
+            ci_strings = subsample_close_shell(
+                bitstring_matrix=bitstrings_post,
+                probabilities=probs_post,
+                carryover=carryover,
+                subspace_dim=sqd_dim,
+                norb=norb,
+                num_elec_a=num_elec_a,
+            )
+            sbd_result = asyncio.run(
+                davidson_solver.run(
+                    ci_strings=(ci_strings, ci_strings),
+                    one_body_tensor=elec_props.one_body_tensor,
+                    two_body_tensor=elec_props.two_body_tensor,
+                    norb=norb,
+                    nelec=elec_props.num_electrons,
+                )
+            )
+            step_carryover = sbd_result.carryover_bitstrings
+            net_dim = int(len(ci_strings) ** 2)
+            save_kwargs = dict(alphadets=ci_strings)
+
+        energy = sbd_result.energy + elec_props.nuclear_repulsion_energy
+        logger.info(
+            "Recovery step %d/%d: energy = %.6f (net subspace dim = %d)",
+            recovery_step + 1,
+            n_recovery_steps,
+            energy,
+            net_dim,
+        )
+
         report_s3 = save_ndarray(
             file_prefix="sqd_data",
             ucj_parameter=ucj_parameter,
             raw_bitstrings=raw_bitstrings,
             recovered_bitstrings=bitstrings,
-            alphadets=ci_a,
-            betadets=ci_b,
             avg_occupancy=sbd_result.orbital_occupancies[0],
             avg_occupancy_b=sbd_result.orbital_occupancies[1],
-            carryover=next_carryover,
+            carryover=step_carryover,
+            **save_kwargs,
         )
-        logger.debug(f"Saved SQD data in '{report_s3}'.")
-        telemetry.update(
-            num_post_determinants=len(bitstrings_post),
-            net_subspace_dim=int(len(ci_a) * len(ci_b)),
-            energy=float(energy),
-            sqd_data=str(report_s3),
-            last_updated=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        )
-        return ((energy, next_carryover), telemetry)
 
-    ci_strings = subsample_close_shell(
-        bitstring_matrix=bitstrings_post,
-        probabilities=probs_post,
-        carryover=carryover,
-        subspace_dim=sqd_dim,
-        norb=norb,
-        num_elec_a=elec_props.num_electrons[0],
-    )
-    # Run SBD immediately
-    sbd_result: SBDResult = asyncio.run(
-        davidson_solver.run(
-            ci_strings=(ci_strings, ci_strings),
-            one_body_tensor=elec_props.one_body_tensor,
-            two_body_tensor=elec_props.two_body_tensor,
-            norb=norb,
-            nelec=elec_props.num_electrons,
-        )
-    )
-    logger.debug("Completed diagonalization.")
-    energy = sbd_result.energy + elec_props.nuclear_repulsion_energy
+        # Keep the best (lowest-energy) pass.
+        if best_energy is None or energy < best_energy:
+            best_energy = energy
+            best_carryover = step_carryover
+            best_report_s3 = report_s3
+            best_num_post = len(bitstrings_post)
+            best_net_dim = net_dim
 
-    report_s3 = save_ndarray(
-        file_prefix="sqd_data",
-        ucj_parameter=ucj_parameter,
-        raw_bitstrings=raw_bitstrings,
-        recovered_bitstrings=bitstrings,
-        alphadets=ci_strings,
-        avg_occupancy=sbd_result.orbital_occupancies[0],
-        carryover=sbd_result.carryover_bitstrings,
-    )
-    logger.debug(f"Saved SQD data in '{report_s3}'.")
+        # Feed the solver's occupancies into the next recovery pass (self-consistency).
+        avg_occ = sbd_result.orbital_occupancies
 
+    logger.debug("Completed configuration recovery loop.")
     telemetry.update(
-        num_post_determinants=len(bitstrings_post),
-        net_subspace_dim=int(len(ci_strings) ** 2),
-        energy=float(energy),
-        sqd_data=str(report_s3),
+        num_post_determinants=best_num_post,
+        net_subspace_dim=best_net_dim,
+        energy=float(best_energy),
+        n_recovery_steps=n_recovery_steps,
+        sqd_data=str(best_report_s3),
         last_updated=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     )
 
-    return ((energy, sbd_result.carryover_bitstrings), telemetry)
+    return ((best_energy, best_carryover), telemetry)
 
 
 def _stack_spin_carryover(
