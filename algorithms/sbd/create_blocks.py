@@ -631,6 +631,15 @@ def main() -> None:
                 "enable_gates": bool(gate_twirl),
                 "enable_measure": bool(meas_twirl),
             }
+        if gate_twirl:
+            # IBM Runtime rejects gate twirling on fractional gates (error 1519). The LUCJ
+            # ansatz transpiles to fractional rzz gates, and prefect_qiskit's get_target() does
+            # not expose use_fractional_gates, so gate twirling cannot run through this stack.
+            print(
+                "  WARNING: gate twirling (enable_gates) is incompatible with the fractional "
+                "rzz gates in the LUCJ circuit and will fail with IBM error 1519. Prefer "
+                "--measure-twirling and --dynamical-decoupling instead."
+            )
 
     _set_variable(options_variable_name, options_value)
 
