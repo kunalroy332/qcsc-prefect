@@ -102,6 +102,33 @@ def _parse_args() -> argparse.Namespace:
         "--sqd-options-json",
         help='Raw JSON for Prefect variable value (e.g. \'{"params": {"shots": 50000}}\').',
     )
+    parser.add_argument(
+        "--dynamical-decoupling",
+        dest="dynamical_decoupling",
+        action="store_true",
+        default=None,
+        help="Enable dynamical decoupling on idle qubits during sampling (IBM SamplerV2).",
+    )
+    parser.add_argument(
+        "--dd-sequence",
+        dest="dd_sequence",
+        choices=["XX", "XpXm", "XY4"],
+        help="Dynamical-decoupling pulse sequence (default XY4 when DD is enabled).",
+    )
+    parser.add_argument(
+        "--gate-twirling",
+        dest="gate_twirling",
+        action="store_true",
+        default=None,
+        help="Enable Pauli twirling of 2-qubit gates (IBM SamplerV2).",
+    )
+    parser.add_argument(
+        "--measure-twirling",
+        dest="measure_twirling",
+        action="store_true",
+        default=None,
+        help="Enable measurement twirling (IBM SamplerV2).",
+    )
     return parser.parse_args()
 
 
@@ -195,6 +222,12 @@ def _env_values() -> dict[str, Any]:
                 return raw
         return None
 
+    def env_bool(name: str) -> bool | None:
+        raw = os.getenv(name, "").strip().lower()
+        if not raw:
+            return None
+        return raw in ("1", "true", "yes", "on")
+
     def env_first_int(*names: str) -> int | None:
         for name in names:
             value = env_int(name)
@@ -246,6 +279,10 @@ def _env_values() -> dict[str, Any]:
         "method": env_first_str("SBD_METHOD"),
         "shots": env_int("SBD_SHOTS"),
         "sqd_options_json": env_first_str("SBD_OPTIONS_JSON"),
+        "dynamical_decoupling": env_bool("SBD_DYNAMICAL_DECOUPLING"),
+        "dd_sequence": env_first_str("SBD_DD_SEQUENCE"),
+        "gate_twirling": env_bool("SBD_GATE_TWIRLING"),
+        "measure_twirling": env_bool("SBD_MEASURE_TWIRLING"),
     }
 
 
@@ -569,6 +606,32 @@ def main() -> None:
         options_value = json.loads(str(sqd_options_json))
     else:
         options_value = {"params": {"shots": shots}}
+
+    # Error mitigation: inject dynamical decoupling and/or Pauli twirling into the SamplerV2
+    # options. These pass through prefect_qiskit's REST gate (extra="ignore") to the IBM Runtime
+    # server verbatim. Off by default so existing/legacy runs are byte-for-byte unchanged.
+    dd_enabled = bool(_pick_value(args.dynamical_decoupling, config.get("dynamical_decoupling"),
+                                  env.get("dynamical_decoupling"), False))
+    gate_twirl = bool(_pick_value(args.gate_twirling, config.get("gate_twirling"),
+                                  env.get("gate_twirling"), False))
+    meas_twirl = bool(_pick_value(args.measure_twirling, config.get("measure_twirling"),
+                                  env.get("measure_twirling"), False))
+    dd_sequence = _pick_value(args.dd_sequence, config.get("dd_sequence"),
+                              env.get("dd_sequence"), "XY4")
+    if dd_enabled or gate_twirl or meas_twirl:
+        params = options_value.setdefault("params", {})
+        sampler_options = params.setdefault("options", {})
+        if dd_enabled:
+            sampler_options["dynamical_decoupling"] = {
+                "enable": True,
+                "sequence_type": str(dd_sequence),
+            }
+        if gate_twirl or meas_twirl:
+            sampler_options["twirling"] = {
+                "enable_gates": bool(gate_twirl),
+                "enable_measure": bool(meas_twirl),
+            }
+
     _set_variable(options_variable_name, options_value)
 
     print(f"Saved blocks and variable for SBD workflow (target={hpc_target})")
@@ -584,6 +647,11 @@ def main() -> None:
         print(f"  SBD UHF executable: {Path(str(sbd_executable_uhf)).expanduser().resolve()}")
     print(f"  Script filename: {script_filename}")
     print(f"  Metrics artifact key: {metrics_artifact_key}")
+    mitigation = options_value.get("params", {}).get("options", {})
+    if mitigation:
+        print(f"  Error mitigation: {json.dumps(mitigation)}")
+    else:
+        print("  Error mitigation: none")
 
 
 if __name__ == "__main__":
