@@ -237,6 +237,7 @@ def differential_evolution_trial(
             quantum_source=parameters.quantum_source,
             random_seed=parameters.random_seed,
             n_recovery_steps=parameters.n_recovery_steps,
+            n_batches=parameters.n_batches,
         )
         futs.append(prefect_fut)
 

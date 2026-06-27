@@ -134,6 +134,21 @@ class FlowParameters(BaseModel):
         ge=1,
     )
 
+    n_batches: int = Field(
+        default=1,
+        description=(
+            "Number of independent subsample batches per recovery pass (the K-batch SQD scheme "
+            "of arXiv:2405.05068). Each batch draws its own subspace of dimension sqd_dim from the "
+            "recovered distribution and is diagonalized separately; the reported energy is the "
+            "minimum over batches and the occupancies fed to the next recovery pass are the "
+            "average over batches. 1 = single batch (legacy). 5-10 stabilizes the occupancy and "
+            "improves the chance of capturing low-excitation configurations. Cost scales linearly "
+            "with this value."
+        ),
+        title="SQD Batches per Recovery",
+        ge=1,
+    )
+
     quantum_source: Literal["real-device", "random"] = Field(
         default="real-device",
         description=(

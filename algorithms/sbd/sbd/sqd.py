@@ -74,6 +74,7 @@ def walker_sqd(
     quantum_source: str,
     random_seed: int,
     n_recovery_steps: int = 1,
+    n_batches: int = 1,
 ) -> tuple[tuple[float, NpStrict2DArrayBool], dict[str, Any]]:
     logger = get_run_logger()
     davidson_solver = SBDSolverJob.load(solver_block_name)
@@ -265,81 +266,116 @@ def walker_sqd(
             len({row.tobytes() for row in bitstrings_post}) if bitstrings_post.shape[0] else 0,
         )
 
+        # K-batch SQD (arXiv:2405.05068): draw n_batches independent subspaces from the SAME
+        # recovered distribution, diagonalize each, then take the MINIMUM energy as the variational
+        # estimate and the MEAN occupancy across batches to feed the next recovery pass. A single
+        # batch's occupancy is too noisy to steer recovery; averaging over batches stabilizes it.
         if elec_props.unrestricted:
-            # Carryover crossing the optimizer boundary is a single 2*norb-wide bool array using
-            # the same (beta-left, alpha-right) layout as the sampled bitstrings. Split it per spin.
             carryover_b = carryover[:, :norb]
             carryover_a = (
                 carryover[:, norb:] if carryover.shape[1] >= 2 * norb else carryover[:, :norb]
             )
-            ci_a, ci_b = subsample_open_shell(
-                bitstring_matrix=bitstrings_post,
-                probabilities=probs_post,
-                carryover_a=carryover_a,
-                carryover_b=carryover_b,
-                subspace_dim=sqd_dim,
-                norb=norb,
-                num_elec_a=num_elec_a,
-                num_elec_b=num_elec_b,
-            )
-            # [diag] excitation profile of the subspace (the make-or-break metric: if dominated by
-            # >2 excitations, the subspace cannot couple to HF and the energy stays at SCF).
-            logger.info("[diag] recovery %d/%d alpha dets: %s",
-                        recovery_step + 1, n_recovery_steps,
-                        _excitation_summary(ci_a, num_elec_a))
-            logger.info("[diag] recovery %d/%d beta  dets: %s",
-                        recovery_step + 1, n_recovery_steps,
-                        _excitation_summary(ci_b, num_elec_b))
-            sbd_result = asyncio.run(
-                davidson_solver.run(
-                    ci_strings=(ci_a, ci_b),
-                    one_body_tensor=elec_props.one_body_tensor,
-                    two_body_tensor=elec_props.two_body_tensor,
-                    norb=norb,
-                    nelec=elec_props.num_electrons,
-                    one_body_tensor_b=elec_props.one_body_tensor_b,
-                    two_body_tensor_ab=elec_props.two_body_tensor_ab,
-                    two_body_tensor_bb=elec_props.two_body_tensor_bb,
-                )
-            )
-            step_carryover = _stack_spin_carryover(
-                carryover_a=sbd_result.carryover_bitstrings,
-                carryover_b=sbd_result.carryover_bitstrings_b,
-                norb=norb,
-            )
-            net_dim = int(len(ci_a) * len(ci_b))
-            save_kwargs = dict(alphadets=ci_a, betadets=ci_b)
-        else:
-            ci_strings = subsample_close_shell(
-                bitstring_matrix=bitstrings_post,
-                probabilities=probs_post,
-                carryover=carryover,
-                subspace_dim=sqd_dim,
-                norb=norb,
-                num_elec_a=num_elec_a,
-            )
-            logger.info("[diag] recovery %d/%d dets: %s",
-                        recovery_step + 1, n_recovery_steps,
-                        _excitation_summary(ci_strings, num_elec_a))
-            sbd_result = asyncio.run(
-                davidson_solver.run(
-                    ci_strings=(ci_strings, ci_strings),
-                    one_body_tensor=elec_props.one_body_tensor,
-                    two_body_tensor=elec_props.two_body_tensor,
-                    norb=norb,
-                    nelec=elec_props.num_electrons,
-                )
-            )
-            step_carryover = sbd_result.carryover_bitstrings
-            net_dim = int(len(ci_strings) ** 2)
-            save_kwargs = dict(alphadets=ci_strings)
 
-        energy = sbd_result.energy + elec_props.nuclear_repulsion_energy
+        batch_energy: float | None = None  # min over batches (the variational estimate)
+        batch_carryover = None  # carryover of the best (lowest-energy) batch
+        batch_net_dim = 0
+        batch_save_kwargs: dict = {}
+        occ_a_accum = np.zeros(norb, dtype=np.float64)
+        occ_b_accum = np.zeros(norb, dtype=np.float64)
+
+        for batch in range(n_batches):
+            if elec_props.unrestricted:
+                ci_a, ci_b = subsample_open_shell(
+                    bitstring_matrix=bitstrings_post,
+                    probabilities=probs_post,
+                    carryover_a=carryover_a,
+                    carryover_b=carryover_b,
+                    subspace_dim=sqd_dim,
+                    norb=norb,
+                    num_elec_a=num_elec_a,
+                    num_elec_b=num_elec_b,
+                )
+                if batch == 0:
+                    # [diag] excitation profile of batch 0 (make-or-break: a subspace dominated by
+                    # >2 excitations cannot couple to HF and the energy stays at SCF).
+                    logger.info("[diag] recovery %d/%d alpha dets: %s", recovery_step + 1,
+                                n_recovery_steps, _excitation_summary(ci_a, num_elec_a))
+                    logger.info("[diag] recovery %d/%d beta  dets: %s", recovery_step + 1,
+                                n_recovery_steps, _excitation_summary(ci_b, num_elec_b))
+                sbd_result = asyncio.run(
+                    davidson_solver.run(
+                        ci_strings=(ci_a, ci_b),
+                        one_body_tensor=elec_props.one_body_tensor,
+                        two_body_tensor=elec_props.two_body_tensor,
+                        norb=norb,
+                        nelec=elec_props.num_electrons,
+                        one_body_tensor_b=elec_props.one_body_tensor_b,
+                        two_body_tensor_ab=elec_props.two_body_tensor_ab,
+                        two_body_tensor_bb=elec_props.two_body_tensor_bb,
+                    )
+                )
+                this_carryover = _stack_spin_carryover(
+                    carryover_a=sbd_result.carryover_bitstrings,
+                    carryover_b=sbd_result.carryover_bitstrings_b,
+                    norb=norb,
+                )
+                this_net_dim = int(len(ci_a) * len(ci_b))
+                this_save_kwargs = dict(alphadets=ci_a, betadets=ci_b)
+            else:
+                ci_strings = subsample_close_shell(
+                    bitstring_matrix=bitstrings_post,
+                    probabilities=probs_post,
+                    carryover=carryover,
+                    subspace_dim=sqd_dim,
+                    norb=norb,
+                    num_elec_a=num_elec_a,
+                )
+                if batch == 0:
+                    logger.info("[diag] recovery %d/%d dets: %s", recovery_step + 1,
+                                n_recovery_steps, _excitation_summary(ci_strings, num_elec_a))
+                sbd_result = asyncio.run(
+                    davidson_solver.run(
+                        ci_strings=(ci_strings, ci_strings),
+                        one_body_tensor=elec_props.one_body_tensor,
+                        two_body_tensor=elec_props.two_body_tensor,
+                        norb=norb,
+                        nelec=elec_props.num_electrons,
+                    )
+                )
+                this_carryover = sbd_result.carryover_bitstrings
+                this_net_dim = int(len(ci_strings) ** 2)
+                this_save_kwargs = dict(alphadets=ci_strings)
+
+            this_energy = sbd_result.energy + elec_props.nuclear_repulsion_energy
+            # Accumulate occupancies (averaged over batches -> next recovery pass).
+            occ_a_accum += np.asarray(sbd_result.orbital_occupancies[0], dtype=np.float64)
+            occ_b_accum += np.asarray(sbd_result.orbital_occupancies[1], dtype=np.float64)
+            logger.info(
+                "[diag] recovery %d/%d batch %d/%d: energy = %.6f (net dim = %d)",
+                recovery_step + 1, n_recovery_steps, batch + 1, n_batches,
+                this_energy, this_net_dim,
+            )
+            # Keep the lowest-energy batch as this step's variational estimate.
+            if batch_energy is None or this_energy < batch_energy:
+                batch_energy = this_energy
+                batch_carryover = this_carryover
+                batch_net_dim = this_net_dim
+                batch_save_kwargs = this_save_kwargs
+
+        energy = batch_energy
+        step_carryover = batch_carryover
+        net_dim = batch_net_dim
+        save_kwargs = batch_save_kwargs
+        # Mean occupancy across batches -> the occupancies that steer the NEXT recovery pass.
+        step_occ_a = occ_a_accum / n_batches
+        step_occ_b = occ_b_accum / n_batches
+
         logger.info(
-            "Recovery step %d/%d: energy = %.6f (net subspace dim = %d)",
+            "Recovery step %d/%d: best energy = %.6f over %d batch(es) (net subspace dim = %d)",
             recovery_step + 1,
             n_recovery_steps,
             energy,
+            n_batches,
             net_dim,
         )
 
@@ -348,8 +384,8 @@ def walker_sqd(
             ucj_parameter=ucj_parameter,
             raw_bitstrings=raw_bitstrings,
             recovered_bitstrings=bitstrings,
-            avg_occupancy=sbd_result.orbital_occupancies[0],
-            avg_occupancy_b=sbd_result.orbital_occupancies[1],
+            avg_occupancy=step_occ_a,
+            avg_occupancy_b=step_occ_b,
             carryover=step_carryover,
             **save_kwargs,
         )
@@ -362,8 +398,8 @@ def walker_sqd(
             best_num_post = len(bitstrings_post)
             best_net_dim = net_dim
 
-        # Feed the solver's occupancies into the next recovery pass (self-consistency).
-        avg_occ = sbd_result.orbital_occupancies
+        # Feed the batch-averaged occupancies into the next recovery pass (self-consistency).
+        avg_occ = (step_occ_a, step_occ_b)
 
     logger.debug("Completed configuration recovery loop.")
     telemetry.update(
@@ -371,6 +407,7 @@ def walker_sqd(
         net_subspace_dim=best_net_dim,
         energy=float(best_energy),
         n_recovery_steps=n_recovery_steps,
+        n_batches=n_batches,
         sqd_data=str(best_report_s3),
         last_updated=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     )
