@@ -35,6 +35,28 @@ recover_configurations = task(_recover_configurations)
 MODULE_RNG = np.random.default_rng(seed=1333)
 
 
+def _excitation_summary(ci_strings: np.ndarray, num_elec: int) -> str:
+    """Summarize a determinant list by excitation level from Hartree-Fock.
+
+    The Hamiltonian only couples HF to single/double excitations (Slater-Condon), so a subspace
+    dominated by high (>2) excitations cannot lower the energy below HF. This is the key diagnostic
+    for why a large subspace can still collapse to the SCF energy. Returns a compact histogram.
+    """
+    ci = np.asarray(ci_strings, dtype=np.int64).reshape(-1)
+    if ci.size == 0:
+        return "empty"
+    hf = (1 << num_elec) - 1  # lowest num_elec orbitals occupied
+    # excitation level = (number of differing occupied orbitals) / 2
+    exc = np.array([bin(int(x) ^ hf).count("1") // 2 for x in ci])
+    n_hf = int(np.sum(exc == 0))
+    n_sd = int(np.sum((exc >= 1) & (exc <= 2)))  # singles+doubles (couple to HF)
+    n_high = int(np.sum(exc >= 3))
+    return (
+        f"n={ci.size} unique={len(set(ci.tolist()))} HF={n_hf} "
+        f"singles+doubles={n_sd} higher(>2)={n_high} max_exc={int(exc.max())}"
+    )
+
+
 @task(
     task_run_name="run_sqd_#{trial_index:02d}-{walker_index}",
 )
@@ -193,7 +215,32 @@ def walker_sqd(
     best_num_post = 0
     best_net_dim = 0
 
+    # One-time diagnostics on the raw quantum samples (before any recovery).
+    logger.info(
+        "[diag] raw samples: %d bitstrings, %d unique (norb=%d, nelec=(%d,%d))",
+        raw_bitstrings.shape[0],
+        len({row.tobytes() for row in raw_bitstrings}),
+        norb,
+        num_elec_a,
+        num_elec_b,
+    )
+
     for recovery_step in range(n_recovery_steps):
+        # [diag] occupancies feeding this recovery pass (per-spin); fractional values are what
+        # configuration recovery needs to bias toward correlated configs.
+        occ_a_arr, occ_b_arr = np.asarray(avg_occ[0]), np.asarray(avg_occ[1])
+        n_frac = int(np.sum((occ_a_arr > 0.01) & (occ_a_arr < 0.99))) + int(
+            np.sum((occ_b_arr > 0.01) & (occ_b_arr < 0.99))
+        )
+        logger.info(
+            "[diag] recovery %d/%d input occ: sum_a=%.3f sum_b=%.3f fractional=%d",
+            recovery_step + 1,
+            n_recovery_steps,
+            float(occ_a_arr.sum()),
+            float(occ_b_arr.sum()),
+            n_frac,
+        )
+
         bitstrings, probs = recover_configurations(
             bitstring_matrix=raw_bitstrings,
             probabilities=raw_probs,
@@ -207,6 +254,15 @@ def walker_sqd(
             probabilities=probs,
             hamming_right=num_elec_a,
             hamming_left=num_elec_b,
+        )
+        # [diag] how many configs survive Hamming-weight post-selection (the usable subspace seed).
+        logger.info(
+            "[diag] recovery %d/%d post-select: %d / %d configs survived (%d unique)",
+            recovery_step + 1,
+            n_recovery_steps,
+            bitstrings_post.shape[0],
+            bitstrings.shape[0],
+            len({row.tobytes() for row in bitstrings_post}) if bitstrings_post.shape[0] else 0,
         )
 
         if elec_props.unrestricted:
@@ -226,6 +282,14 @@ def walker_sqd(
                 num_elec_a=num_elec_a,
                 num_elec_b=num_elec_b,
             )
+            # [diag] excitation profile of the subspace (the make-or-break metric: if dominated by
+            # >2 excitations, the subspace cannot couple to HF and the energy stays at SCF).
+            logger.info("[diag] recovery %d/%d alpha dets: %s",
+                        recovery_step + 1, n_recovery_steps,
+                        _excitation_summary(ci_a, num_elec_a))
+            logger.info("[diag] recovery %d/%d beta  dets: %s",
+                        recovery_step + 1, n_recovery_steps,
+                        _excitation_summary(ci_b, num_elec_b))
             sbd_result = asyncio.run(
                 davidson_solver.run(
                     ci_strings=(ci_a, ci_b),
@@ -254,6 +318,9 @@ def walker_sqd(
                 norb=norb,
                 num_elec_a=num_elec_a,
             )
+            logger.info("[diag] recovery %d/%d dets: %s",
+                        recovery_step + 1, n_recovery_steps,
+                        _excitation_summary(ci_strings, num_elec_a))
             sbd_result = asyncio.run(
                 davidson_solver.run(
                     ci_strings=(ci_strings, ci_strings),
