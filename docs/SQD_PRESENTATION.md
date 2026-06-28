@@ -211,16 +211,23 @@ The single most important table. All vs UCCSD in mHa, 5–8 seeds, `n_lucj_layer
 | 300k | 120k | 0.01 | +54.7 | 0.0 | locked |
 | 100k | 20k | **0 (noiseless)** | +12.9 | 26.4 | [−8.7, +57.8] |
 
-**What these show:**
-1. **Recovery depth is the dominant lever.** `n_recovery_steps` 1→3 drops the mean ~40 mHa and
-   unlocks beating UCCSD. Connectivity shifts the mean only ~1 mHa at fixed recovery.
-2. **Batches help only with recovery.** b 1→5 at rec=1 stays pinned (+58–60); b+rec together work.
-3. **Smaller `sqd_dim` is better.** Large subspace deterministically locks to the +55 mHa floor —
-   it dilutes good configs with high-excitation deadwood. Our 50q runs used 200k; the new runs use
-   **20k**. More shots do not rescue a large subspace.
-4. **The variance is intrinsic, not noise.** It is bimodal *even noiselessly* (range −8.7…+57.8):
-   the random subsample either lands on a good compact subspace or a mediocre one. Mitigate with
-   **many independent draws → high `num_walkers`, take the best.**
+**What these show (note: an early seed sweep suggested "recovery is the lever"; controlled
+follow-up tests below CORRECTED that — see the revised conclusions):**
+1. **`sqd_dim` has a GOLDILOCKS optimum, not monotonic.** Reproduced cleanly (CN 20q, noiseless,
+   full conn): dim=2k (44 dets/spin) → +83; dim=20k (141) → **−6.2 (beats UCCSD)**; dim=200k (447) →
+   +55 (too big → dilution to the floor). The optimum is dets/spin ≈ the low-excitation manifold
+   size; bigger is *harmful*, smaller starves it. This must be tuned per molecule.
+2. **Recovery depth is NOT a lever** (corrects the early seed-sweep reading, which was confounded
+   by single-seed variance). Isolated test at fixed dim: `n_recovery_steps` 1/2/3/5 give *identical*
+   energy. On hardware deep recovery is mildly harmful (drives occupancies integer after step 1).
+3. **Connectivity matters at the right `sqd_dim`** — full UCJ beats UCCSD where heavy-hex does not,
+   noiselessly; but full connectivity is impractical on heavy-hex hardware (SWAP depth → more noise).
+4. **The variance is intrinsic, not noise.** Bimodal *even noiselessly* (range −8.7…+57.8): the
+   random subsample either lands on a good compact subspace or a mediocre one. Mitigate with **many
+   independent draws → high `num_walkers`, take the best.**
+5. **RHF-SQD and UHF-SQD are EQUIVALENT.** Noiseless N2 (closed-shell, RHF≡UHF physically): at the
+   right `sqd_dim` BOTH reach FCI exactly (−8.5 mHa vs CCSD), identically. The UHF spin-unbalanced
+   LUCJ parametrization is correct — it is not the cause of the 50q plateau.
 
 > Honest correction: the −6.2 mHa "beats UCCSD" in 5C is a *lucky single seed*. Seed-averaged, the
 > mean is ~+44 mHa with std ~26; SQD beats UCCSD on a *fraction* of draws when recovery is deep.
@@ -237,20 +244,25 @@ twirling, 1 layer, `iterations=1`.
 | **A** (`run_A_recmax`) | 5 | 10 | 8 | recovery depth |
 | **B** (`run_B_walkers`) | 3 | 5 | 16 | many independent draws |
 
-The headline experiment: does **small `sqd_dim` + deep recovery / many walkers** finally move 50q
-off the +20 mHa floor.
+**Result: both hit the same +20 mHa-above-SCF / +290-above-UCCSD floor** (B best −152.3238; A timed
+out at the 180-min walltime mid-run, same floor). Post-mortem found `sqd_dim=20k` was *undersized*
+for C4H5 (25 orbitals → 141 dets/spin is ~0.004% of the 3.2M-per-spin space; only ~5 of 141 were
+singles/doubles), and the diagnostics show the diagonalizer returning the bare HF determinant
+(spin density `[0…1…0]`, batch energies exactly = SCF). Lesson: `sqd_dim`'s Goldilocks value scales
+with system size — 20k is right for a 10-orbital molecule, far too small for 25 orbitals.
 
 ---
 
 ## 7. Conclusions — the four questions answered
 
 **Q1. Are we performing enough quantum sampling (shots) relative to the number of subsamples?**
-Current: **shots = 100,000**; subspace per spin ≈ **√sqd_dim**. With the old `sqd_dim=200,000`,
-that is ≈ 447 α × 447 β determinants — and the raw sample has 40–50k unique post-select configs, so
-shots are *not* the binding constraint. The variance study showed the opposite problem: **a large
-`sqd_dim` is harmful** (it pulls in deadwood and locks to the floor); **more shots do not help a
-large subspace.** Recommendation: **small `sqd_dim` (≈20k → ~141 dets/spin) with 100k shots is
-well-balanced**; shots are adequate, the subspace size was the miscalibrated knob.
+Current: **shots = 100,000**; subspace per spin ≈ **√sqd_dim**. The raw sample has 30–50k unique
+post-select configs, so **shots are NOT the binding constraint** (more shots never rescued a run).
+The miscalibrated knob is **`sqd_dim`**, which has a *Goldilocks* optimum that must scale with
+system size: dets/spin should be ≈ the molecule's low-excitation manifold. For a 10-orbital molecule
+~141 dets/spin (sqd_dim≈20k) is right; for 25-orbital C4H5 that is far too few (≈0.004% of the
+space) and starves the subspace, while too-large dilutes it with deadwood. **Recommendation: tune
+`sqd_dim` per molecule to its Goldilocks value; 100k shots are adequate.**
 
 **Q2. Is the inner loop, outer loop, or both being executed — and how many of each?**
 - **Outer loop** = DE generations = `de_params.iterations`. **All production runs used
@@ -292,10 +304,15 @@ well-balanced**; shots are adequate, the subspace size was the miscalibrated kno
 
 ## 8. Recommendations (forward)
 
-1. **Set `sqd_dim` small (~20k), not large.** Biggest miscalibration we found.
-2. **Use deep recovery (`n_recovery_steps ≥ 3`) — the dominant lever** — with `n_batches ≥ 5`.
+1. **Tune `sqd_dim` to its Goldilocks value per molecule** (dets/spin ≈ low-excitation manifold) —
+   *not* a fixed small number and *not* maximal. This was the biggest miscalibration. For C4H5
+   (25 orb) it is larger than 20k; find it with a local `sqd_dim` proxy sweep before the next run.
+2. **Do NOT rely on deep recovery** — `n_recovery_steps` is not a lever (1–5 give the same energy);
+   1–2 is sufficient. `n_batches ≥ 5` for best-of and stable averaged occupancy.
 3. **Raise `num_walkers` (8–16)** to beat the intrinsic bimodal variance; take the best walker.
 4. **Turn on the outer loop (`iterations ≥ 2`)** to finally exercise α/β carryover feedback.
 5. **Connectivity:** full UCJ beats UCCSD noiselessly but is impractical on heavy-hex hardware;
    reaching HCI/DMRG-class accuracy needs lower-noise or non-heavy-hex hardware. (HCI/DMRG are
    external references; not computable in this environment.)
+6. **The UHF parametrization is verified correct** (RHF-SQD ≡ UHF-SQD → FCI on N2, §5E). The 50q
+   plateau is hardware noise + `sqd_dim` mis-tuning, *not* the open-shell ansatz.
