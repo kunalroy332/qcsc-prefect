@@ -63,40 +63,70 @@ def _heavy_hex_indices(norb: int) -> tuple[list[tuple[int, int]], list[tuple[int
     return aa, ab
 
 
+def _connectivity_pairs(norb: int, connectivity):
+    """Resolve a connectivity spec into the (aa, ab, bb) interaction_pairs for UCJOpSpinUnbalanced.
+
+    - "heavy-hex": production hardware locality (aa nearest-neighbor, ab on every 4th orbital).
+    - "full" / None: interaction_pairs=None (all orbital pairs; richest, non-heavy-hex hardware).
+    - int R: an *intermediate* locality -- aa within distance R, ab on-site for every orbital.
+      R=1 reduces toward heavy-hex; large R approaches full. Lets us map the connectivity ladder.
+    """
+    if connectivity == "full" or connectivity is None:
+        return None
+    if connectivity == "heavy-hex":
+        aa, ab = _heavy_hex_indices(norb)
+        return (aa, ab, _default_bb := lucj._default_bb_indices(aa, None))
+    if isinstance(connectivity, int):
+        radius = connectivity
+        aa = [(p, q) for p in range(norb) for q in range(p + 1, min(p + radius + 1, norb))]
+        ab = [(p, p) for p in range(norb)]
+        bb = list(aa)
+        return (aa, ab, bb)
+    raise ValueError(f"unknown connectivity spec: {connectivity!r}")
+
+
+def _build_ucj_op(elec_props, *, n_lucj_layers, connectivity):
+    """Build the UCJ operator via the PRODUCTION optimize=True parametrization.
+
+    Mirrors ``lucj._initialize_ucj_parameters_uhf._t2_to_ucj_parameters`` exactly (optimize=True,
+    n_reps=L+1, truncate the last rep into final_orbital_rotation) so connectivity comparisons are
+    valid. Using bare from_t_amplitudes WITHOUT optimize=True collapses the state to ~HF and gives
+    meaningless results.
+    """
+    pairs = _connectivity_pairs(elec_props.num_orbitals, connectivity)
+    t2 = (elec_props.t2, elec_props.t2_ab, elec_props.t2_bb)
+    tmp = ffsim.UCJOpSpinUnbalanced.from_t_amplitudes(
+        t2=t2, n_reps=n_lucj_layers + 1, interaction_pairs=pairs,
+        optimize=True, options={"maxiter": 50},
+    )
+    return ffsim.UCJOpSpinUnbalanced(
+        diag_coulomb_mats=tmp.diag_coulomb_mats[:-1],
+        orbital_rotations=tmp.orbital_rotations[:-1],
+        final_orbital_rotation=tmp.orbital_rotations[-1],
+    )
+
+
 def prepare_state_and_sample(
     elec_props: chem.ElectronicProperties,
     *,
     n_lucj_layers: int,
     shots: int,
     seed: int,
+    connectivity="heavy-hex",
+    noise_p: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build the LUCJ state with ffsim and sample it noiselessly.
+    """Build the LUCJ state with ffsim, sample it, and optionally inject bit-flip noise.
 
-    Returns the raw (bitstring_matrix_bool, probabilities) in the SAME (beta-left, alpha-right)
-    layout the production ``bit_array_to_arrays`` produces, so the result feeds straight into
-    ``recover_configurations`` / ``subsample_open_shell``.
+    ``connectivity`` selects the UCJ interaction pairs ("heavy-hex", "full"/None, or an int
+    locality radius). ``noise_p`` flips each measured bit with probability p (0 = noiseless).
+    Returns the raw (bitstring_matrix_bool, probabilities) in the (beta-left, alpha-right) layout
+    that feeds straight into ``recover_configurations`` / ``subsample_open_shell``.
     """
     norb = elec_props.num_orbitals
     nelec = elec_props.num_electrons
-    aa, ab = _heavy_hex_indices(norb)
 
-    # Reuse the production parameter initializer (walker 0 = CCSD amplitudes, no randomization).
-    params = lucj.initialize_ucj_parameters.fn(
-        elec_props=elec_props,
-        aa_indices=aa,
-        ab_indices=ab,
-        num_walkers=4,
-        randomization_factor=0.0,
-        n_lucj_layers=n_lucj_layers,
-    )[0]
-
-    bb = lucj._default_bb_indices(aa, None)
-    ucj_op = ffsim.UCJOpSpinUnbalanced.from_parameters(
-        params=params,
-        norb=norb,
-        n_reps=n_lucj_layers,
-        interaction_pairs=(aa, ab, bb),
-        with_final_orbital_rotation=True,
+    ucj_op = _build_ucj_op(
+        elec_props, n_lucj_layers=n_lucj_layers, connectivity=connectivity
     )
     vec = ffsim.hartree_fock_state(norb, nelec)
     vec = ffsim.apply_unitary(vec, ucj_op, norb=norb, nelec=nelec)
@@ -107,6 +137,8 @@ def prepare_state_and_sample(
     )
     # strings are 'beta'+'alpha', each 2*norb chars of '0'/'1'.
     mat = np.array([[c == "1" for c in s] for s in strings], dtype=bool)
+    if noise_p > 0.0:
+        mat = inject_bitflip_noise(mat, noise_p, rng)
     probs = np.ones(len(strings), dtype=np.float64) / len(strings)
     return mat, probs
 
