@@ -99,6 +99,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--method", choices=["rhf", "uhf"])
     parser.add_argument("--shots", type=int)
     parser.add_argument(
+        "--n-shot-batches",
+        dest="n_shot_batches",
+        type=int,
+        help=(
+            "Split the quantum sampling into this many sampler jobs of shots//N each and mix them "
+            "(BitArray.concatenate_shots), to reach a large effective shot count without one huge "
+            "IBM job. 1 = single submission (default)."
+        ),
+    )
+    parser.add_argument(
         "--sqd-options-json",
         help='Raw JSON for Prefect variable value (e.g. \'{"params": {"shots": 50000}}\').',
     )
@@ -278,6 +288,7 @@ def _env_values() -> dict[str, Any]:
         "solver_mode": env_first_str("SBD_SOLVER_MODE"),
         "method": env_first_str("SBD_METHOD"),
         "shots": env_int("SBD_SHOTS"),
+        "n_shot_batches": env_int("SBD_N_SHOT_BATCHES"),
         "sqd_options_json": env_first_str("SBD_OPTIONS_JSON"),
         "dynamical_decoupling": env_bool("SBD_DYNAMICAL_DECOUPLING"),
         "dd_sequence": env_first_str("SBD_DD_SEQUENCE"),
@@ -641,6 +652,13 @@ def main() -> None:
                 "--measure-twirling and --dynamical-decoupling instead."
             )
 
+    # Shot batching: a harness-side loop count read by walker_sqd. It lives at the TOP LEVEL of the
+    # options dict (NOT inside params, which is validated against the IBM REST schema).
+    n_shot_batches = int(_pick_value(args.n_shot_batches, config.get("n_shot_batches"),
+                                     env.get("n_shot_batches"), 1) or 1)
+    if n_shot_batches > 1:
+        options_value["n_shot_batches"] = n_shot_batches
+
     _set_variable(options_variable_name, options_value)
 
     print(f"Saved blocks and variable for SBD workflow (target={hpc_target})")
@@ -661,6 +679,12 @@ def main() -> None:
         print(f"  Error mitigation: {json.dumps(mitigation)}")
     else:
         print("  Error mitigation: none")
+    total_shots = options_value.get("params", {}).get("shots")
+    if n_shot_batches > 1:
+        print(f"  Shots: {total_shots} = {n_shot_batches} batches x "
+              f"{int(total_shots) // n_shot_batches} (mixed via concatenate_shots)")
+    else:
+        print(f"  Shots: {total_shots} (single submission)")
 
 
 if __name__ == "__main__":

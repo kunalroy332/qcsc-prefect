@@ -143,40 +143,76 @@ def walker_sqd(
             runtime.resource_name,
             perf_counter() - transpile_start,
         )
+        # Shot batching: reach a large effective shot count by submitting K smaller sampler jobs
+        # and mixing them, instead of one huge job (which times out / can exceed IBM's per-job
+        # cap). n_shot_batches lives at the TOP LEVEL of the options dict (not inside params, which
+        # hits the IBM REST schema). K=1 (default) is byte-for-byte the original single submission.
+        total_shots = int(options.get("params", {}).get("shots", 100_000))
+        n_shot_batches = max(1, int(options.get("n_shot_batches", 1)))
+        per_batch_shots = max(1, total_shots // n_shot_batches)
+
+        # Per-call options must carry only the IBM params; strip the harness-only n_shot_batches.
+        batch_options = {k: v for k, v in options.items() if k != "n_shot_batches"}
+        batch_options = {**batch_options, "params": {**batch_options.get("params", {})}}
+        batch_options["params"]["shots"] = per_batch_shots
+
         logger.info(
-            "Submitting sampler workload to %s (shots=%s).",
+            "Submitting sampler workload to %s (shots=%s = %d batch(es) x %d).",
             runtime.resource_name,
-            options.get("params", {}).get("shots"),
+            total_shots,
+            n_shot_batches,
+            per_batch_shots,
         )
         sampling_start = perf_counter()
-        try:
-            pub_result = runtime.sampler(
-                sampler_pubs=[(isa_circuit,)],
-                options=options,
-                tags=["res: quantum"],
-            )
-        except Exception:
-            logger.exception(
-                "Sampler submission or execution failed for backend %s.",
-                runtime.resource_name,
-            )
-            raise
+        batch_arrays = []
+        raw_shot_total = 0
+        kept_shot_total = 0
+        for shot_batch in range(n_shot_batches):
+            try:
+                pub_result = runtime.sampler(
+                    sampler_pubs=[(isa_circuit,)],
+                    options=batch_options,
+                    tags=["res: quantum"],
+                )
+            except Exception:
+                logger.exception(
+                    "Sampler submission or execution failed for backend %s (shot batch %d/%d).",
+                    runtime.resource_name,
+                    shot_batch + 1,
+                    n_shot_batches,
+                )
+                raise
+            # Reset mitigation is applied per batch (the test register is per submission).
+            meas_bits = pub_result[0].data.meas
+            if circuit_params.use_reset_mitigation:
+                test_bits = pub_result[0].data.test
+                kept = meas_bits.get_bitstrings(test_bits.bitcount() == 0)
+                batch_array = BitArray.from_samples(kept, num_bits=meas_bits.num_bits)
+            else:
+                batch_array = meas_bits
+            batch_arrays.append(batch_array)
+            raw_shot_total += int(meas_bits.num_shots)
+            kept_shot_total += int(batch_array.num_shots)
+            if n_shot_batches > 1:
+                logger.info(
+                    "[diag] shot batch %d/%d: %d kept / %d shots",
+                    shot_batch + 1, n_shot_batches, batch_array.num_shots, meas_bits.num_shots,
+                )
+
+        # Mix the batches into a single pool (sum of shots); K=1 just uses the lone array.
+        bit_array = (
+            batch_arrays[0] if n_shot_batches == 1 else BitArray.concatenate_shots(batch_arrays)
+        )
         logger.info(
-            "Completed sampler workload on %s in %.2fs.",
+            "Completed %d sampler batch(es) on %s in %.2fs (merged %d kept shots).",
+            n_shot_batches,
             runtime.resource_name,
             perf_counter() - sampling_start,
+            kept_shot_total,
         )
-        # Reset mitigation
-        meas_bits = pub_result[0].data.meas
-        if circuit_params.use_reset_mitigation:
-            test_bits = pub_result[0].data.test
-            bit_array = meas_bits.get_bitstrings(test_bits.bitcount() == 0)
-            bit_array = BitArray.from_samples(bit_array, num_bits=meas_bits.num_bits)
-        else:
-            bit_array = meas_bits
-        # Update application telemetry
+        # Update application telemetry (aggregate retention over all batches).
         telemetry.update(
-            shot_retention_rate=float(bit_array.num_shots / meas_bits.num_shots),
+            shot_retention_rate=float(kept_shot_total / raw_shot_total) if raw_shot_total else 0.0,
         )
     else:
         # Random sampling
