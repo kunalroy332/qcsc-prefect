@@ -43,6 +43,36 @@ class SBDResult:
         raise NotImplementedError("SBD Prefect integration doesn't reconstruct sci_state object.")
 
 
+def spin_square_from_subspace(
+    ci_strings: tuple[np.ndarray, np.ndarray],
+    one_body_tensor: np.ndarray,
+    two_body_tensor: np.ndarray,
+    *,
+    open_shell: bool = True,
+) -> float:
+    """Exact <S^2> of the selected-CI ground state over a given determinant subspace.
+
+    Robust, RDM-convention-free spin diagnostic: it re-diagonalizes the SAME determinant
+    subspace (alpha/beta CI string lists) the C++ SBD solver used, via
+    ``qiskit_addon_sqd.fermion.solve_fermion``, and returns the exact <S^2> of that eigenstate.
+    UHF references are not spin eigenstates (spin contamination); SQD diagonalizes the true
+    Hamiltonian in the fixed-(Na, Nb) sector and restores a (near) pure spin state, so <S^2>
+    should approach S(S+1) as the subspace grows. This quantifies that.
+
+    This is intended for small/validation subspaces and the spin-contamination figure; it is an
+    extra diagonalization, so it is NOT wired into the production 50q path automatically. The
+    energy it computes matches the SBD solver to selected-CI precision for the same subspace.
+    """
+    # Imported lazily: solve_fermion pulls in the qiskit-addon-sqd fermion stack, which we only
+    # need when a spin diagnostic is explicitly requested.
+    from qiskit_addon_sqd.fermion import solve_fermion
+
+    _, _, _, spin_sq = solve_fermion(
+        ci_strings, one_body_tensor, two_body_tensor, open_shell=open_shell
+    )
+    return float(spin_sq)
+
+
 def _make_job_work_dir(base_work_dir: Path) -> Path:
     base_work_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

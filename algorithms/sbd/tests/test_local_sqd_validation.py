@@ -89,6 +89,41 @@ def test_spin_contamination_removed():
     )
 
 
+def test_production_spin_square_helper_matches_harness():
+    """solver_job.spin_square_from_subspace reproduces the same <S^2> as the harness solve.
+
+    This validates the production-side, RDM-convention-free <S^2> diagnostic against the
+    subspace the SQD pass actually built, so the Fugaku/production path can report <S^2>.
+    """
+    from sbd.solver_job import spin_square_from_subspace
+
+    ep = H.build_uhf_props(atom=NH["atom"], spin=NH["spin"])
+    na, nb = ep.num_electrons
+    mat, probs = H.prepare_state_and_sample(ep, n_lucj_layers=2, shots=20000, seed=1)
+
+    # Reproduce one recovery+subsample to get the exact determinant subspace.
+    bits, prob = H.sqd.recover_configurations.fn(
+        bitstring_matrix=mat, probabilities=probs,
+        avg_occupancies=ep.initial_occupancy, num_elec_a=na, num_elec_b=nb,
+        rand_seed=np.random.default_rng(0),
+    )
+    bs_post, p_post = H.sqd.postselect_bitstrings.fn(
+        bitstring_matrix=bits, probabilities=prob, hamming_right=na, hamming_left=nb,
+    )
+    H.sqd.MODULE_RNG = np.random.default_rng(0)
+    empty = np.empty((0, ep.num_orbitals), dtype=bool)
+    ci_a, ci_b = H.sqd.subsample_open_shell.fn(
+        bitstring_matrix=bs_post, probabilities=p_post,
+        carryover_a=empty, carryover_b=empty, subspace_dim=4000,
+        norb=ep.num_orbitals, num_elec_a=na, num_elec_b=nb,
+    )
+    s2 = spin_square_from_subspace(
+        (ci_a, ci_b), ep.one_body_tensor, ep.two_body_tensor, open_shell=True
+    )
+    # NH triplet: SQD eigenvector is a near-pure triplet (well below the UHF 2.10 contamination).
+    assert abs(s2 - NH["pure_s2"]) < 0.05, f"<S^2>={s2} not ~{NH['pure_s2']}"
+
+
 def test_recovery_repairs_particle_number():
     """recover_configurations pulls wrong-particle-number scatter back into the valid sector.
 
