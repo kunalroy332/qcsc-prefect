@@ -213,10 +213,13 @@ The single most important table. All vs UCCSD in mHa, 5–8 seeds, `n_lucj_layer
 
 **What these show (note: an early seed sweep suggested "recovery is the lever"; controlled
 follow-up tests below CORRECTED that — see the revised conclusions):**
-1. **`sqd_dim` has a GOLDILOCKS optimum, not monotonic.** Reproduced cleanly (CN 20q, noiseless,
-   full conn): dim=2k (44 dets/spin) → +83; dim=20k (141) → **−6.2 (beats UCCSD)**; dim=200k (447) →
-   +55 (too big → dilution to the floor). The optimum is dets/spin ≈ the low-excitation manifold
-   size; bigger is *harmful*, smaller starves it. This must be tuned per molecule.
+1. **`sqd_dim` scaling — corrected by a dedicated sweep.** An 18-orbital sweep (CN 6-31g, noiseless)
+   shows energy improving **monotonically** with `sqd_dim` (44→1000 dets/spin: +445→+158 mHa, no
+   turnover at 3.1% of the full space). There is **no Goldilocks peak for large systems** — you are
+   always undersampled, so bigger is better (diminishing returns). The earlier small-molecule "200k →
+   +55 floor" was a tiny-space RNG artifact (the subspace already saturated the full 120-config space).
+   **Rule: small molecule → saturate the space; large molecule (C4H5) → use the largest `sqd_dim` the
+   solver affords (default 1M).** The 20k/200k used in the 50q runs were deep in the starvation tail.
 2. **Recovery depth is NOT a lever** (corrects the early seed-sweep reading, which was confounded
    by single-seed variance). Isolated test at fixed dim: `n_recovery_steps` 1/2/3/5 give *identical*
    energy. On hardware deep recovery is mildly harmful (drives occupancies integer after step 1).
@@ -248,8 +251,9 @@ twirling, 1 layer, `iterations=1`.
 out at the 180-min walltime mid-run, same floor). Post-mortem found `sqd_dim=20k` was *undersized*
 for C4H5 (25 orbitals → 141 dets/spin is ~0.004% of the 3.2M-per-spin space; only ~5 of 141 were
 singles/doubles), and the diagnostics show the diagonalizer returning the bare HF determinant
-(spin density `[0…1…0]`, batch energies exactly = SCF). Lesson: `sqd_dim`'s Goldilocks value scales
-with system size — 20k is right for a 10-orbital molecule, far too small for 25 orbitals.
+(spin density `[0…1…0]`, batch energies exactly = SCF). Lesson: `sqd_dim` must scale with system
+size — 20k is fine for a 10-orbital molecule (it saturates the space) but far too small for 25
+orbitals, where bigger is monotonically better (§5E).
 
 ---
 
@@ -258,11 +262,12 @@ with system size — 20k is right for a 10-orbital molecule, far too small for 2
 **Q1. Are we performing enough quantum sampling (shots) relative to the number of subsamples?**
 Current: **shots = 100,000**; subspace per spin ≈ **√sqd_dim**. The raw sample has 30–50k unique
 post-select configs, so **shots are NOT the binding constraint** (more shots never rescued a run).
-The miscalibrated knob is **`sqd_dim`**, which has a *Goldilocks* optimum that must scale with
-system size: dets/spin should be ≈ the molecule's low-excitation manifold. For a 10-orbital molecule
-~141 dets/spin (sqd_dim≈20k) is right; for 25-orbital C4H5 that is far too few (≈0.004% of the
-space) and starves the subspace, while too-large dilutes it with deadwood. **Recommendation: tune
-`sqd_dim` per molecule to its Goldilocks value; 100k shots are adequate.**
+The miscalibrated knob is **`sqd_dim`**. An 18-orbital sweep shows the energy improves **monotonically**
+with `sqd_dim` for large systems (no peak) — you are always undersampled, so bigger is better. For a
+10-orbital molecule ~141 dets/spin (sqd_dim≈20k) already saturates the full space; for 25-orbital
+C4H5 that is ≈0.004% of the space — deep in the starvation tail. **Recommendation: large molecules →
+largest affordable `sqd_dim` (default 1M); small molecules → just saturate the space; 100k shots are
+adequate either way.**
 
 **Q2. Is the inner loop, outer loop, or both being executed — and how many of each?**
 - **Outer loop** = DE generations = `de_params.iterations`. **All production runs used
@@ -304,9 +309,10 @@ space) and starves the subspace, while too-large dilutes it with deadwood. **Rec
 
 ## 8. Recommendations (forward)
 
-1. **Tune `sqd_dim` to its Goldilocks value per molecule** (dets/spin ≈ low-excitation manifold) —
-   *not* a fixed small number and *not* maximal. This was the biggest miscalibration. For C4H5
-   (25 orb) it is larger than 20k; find it with a local `sqd_dim` proxy sweep before the next run.
+1. **Use the largest affordable `sqd_dim` for large molecules** (no Goldilocks peak — energy improves
+   monotonically with subspace size; verified by an 18-orbital sweep). For C4H5 (25 orb) use the
+   default 1M (or more), *not* the 20k/200k that the 50q runs used — those were deep in the
+   starvation tail. Only small molecules (where √sqd_dim saturates the full space) want a modest dim.
 2. **Do NOT rely on deep recovery** — `n_recovery_steps` is not a lever (1–5 give the same energy);
    1–2 is sufficient. `n_batches ≥ 5` for best-of and stable averaged occupancy.
 3. **Raise `num_walkers` (8–16)** to beat the intrinsic bimodal variance; take the best walker.
