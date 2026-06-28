@@ -266,6 +266,24 @@ def walker_sqd(
             len({row.tobytes() for row in bitstrings_post}) if bitstrings_post.shape[0] else 0,
         )
 
+        # [diag] chemistry sanity: every post-selected config must sit in exactly the
+        # (num_elec_a alpha, num_elec_b beta) sector, which fixes Sz = (na - nb)/2 exactly. The
+        # bitstring layout is (beta-left [:norb], alpha-right [norb:]); see subsample_open_shell.
+        if bitstrings_post.shape[0]:
+            beta_pop = bitstrings_post[:, :norb].sum(axis=1)
+            alpha_pop = bitstrings_post[:, norb:].sum(axis=1)
+            sector_ok = bool(
+                np.all(alpha_pop == num_elec_a) and np.all(beta_pop == num_elec_b)
+            )
+            if not sector_ok:
+                logger.warning(
+                    "[diag] recovery %d/%d post-select LEAKED wrong (Na,Nb) sector: "
+                    "alpha in %s, beta in %s (expected %d, %d)",
+                    recovery_step + 1, n_recovery_steps,
+                    sorted(set(alpha_pop.tolist())), sorted(set(beta_pop.tolist())),
+                    num_elec_a, num_elec_b,
+                )
+
         # K-batch SQD (arXiv:2405.05068): draw n_batches independent subspaces from the SAME
         # recovered distribution, diagonalize each, then take the MINIMUM energy as the variational
         # estimate and the MEAN occupancy across batches to feed the next recovery pass. A single
@@ -369,6 +387,19 @@ def walker_sqd(
         # Mean occupancy across batches -> the occupancies that steer the NEXT recovery pass.
         step_occ_a = occ_a_accum / n_batches
         step_occ_b = occ_b_accum / n_batches
+
+        # [diag] per-orbital spin density (n_alpha - n_beta) of the diagonalized state. Large
+        # localized values indicate the spin polarization UHF is meant to capture; the sum equals
+        # 2*Sz = (Na - Nb). This is the cheap, RDM-free spin check (full <S^2> needs the 2-RDM).
+        spin_density = step_occ_a - step_occ_b
+        logger.info(
+            "[diag] recovery %d/%d spin density (n_a-n_b): sum=%.3f (=2Sz=%d) per-orb=%s",
+            recovery_step + 1,
+            n_recovery_steps,
+            float(spin_density.sum()),
+            num_elec_a - num_elec_b,
+            np.array2string(spin_density, precision=3, max_line_width=200),
+        )
 
         logger.info(
             "Recovery step %d/%d: best energy = %.6f over %d batch(es) (net subspace dim = %d)",
