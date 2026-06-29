@@ -401,6 +401,18 @@ def walker_sqd(
     # previous single-pass behavior exactly.
     avg_occ = elec_props.initial_occupancy
 
+    # Per-walker random generator. recover_configurations and the subsample routines must draw
+    # INDEPENDENT subspaces for each walker, otherwise differential evolution / multi-walker
+    # averaging sees correlated draws and loses its diversity. A module-global Generator also races
+    # under the threaded (concurrent) task runner. Derive a deterministic, per-(trial, walker)
+    # seed -- reusing the same Cantor-pairing offset as the random-source path above -- so runs stay
+    # reproducible while every walker is independent.
+    walker_seed = int(
+        random_seed
+        + ((trial_index + walker_index) * (trial_index + walker_index + 1) // 2 + walker_index)
+    )
+    walker_rng = np.random.default_rng(seed=walker_seed)
+
     best_energy: float | None = None
     best_carryover: NpStrict2DArrayBool | None = None
     best_report_s3: str | None = None
@@ -439,7 +451,7 @@ def walker_sqd(
             avg_occupancies=avg_occ,
             num_elec_a=num_elec_a,
             num_elec_b=num_elec_b,
-            rand_seed=MODULE_RNG,
+            rand_seed=walker_rng,
         )
         bitstrings_post, probs_post = postselect_bitstrings(
             bitstring_matrix=bitstrings,
@@ -504,6 +516,7 @@ def walker_sqd(
                     norb=norb,
                     num_elec_a=num_elec_a,
                     num_elec_b=num_elec_b,
+                    rng=walker_rng,
                 )
                 if batch == 0:
                     # [diag] excitation profile of batch 0 (make-or-break: a subspace dominated by
@@ -539,6 +552,7 @@ def walker_sqd(
                     subspace_dim=sqd_dim,
                     norb=norb,
                     num_elec_a=num_elec_a,
+                    rng=walker_rng,
                 )
                 if batch == 0:
                     logger.info("[diag] recovery %d/%d dets: %s", recovery_step + 1,
@@ -720,8 +734,13 @@ def subsample_close_shell(
     subspace_dim: int,
     norb: int,
     num_elec_a: int,
+    rng: np.random.Generator | None = None,
 ) -> NpStrict1DArrayLL:
-    global MODULE_RNG
+    # Use an explicit per-walker Generator when provided so concurrent walkers draw INDEPENDENT
+    # subspaces (and there is no thread race on a shared global). Falls back to MODULE_RNG only for
+    # legacy callers that pass nothing.
+    if rng is None:
+        rng = MODULE_RNG
 
     num_configs = bitstring_matrix.shape[0]
     num_carryover = carryover.shape[0]
@@ -765,7 +784,7 @@ def subsample_close_shell(
         mask = non_hf_mask & non_co_mask
         ci_strs_unique = ci_strs_unique[mask]
         ci_probs_unique = ci_probs_unique[mask]
-        new_strings = MODULE_RNG.choice(
+        new_strings = rng.choice(
             ci_strs_unique,
             size=num_new_samples,
             replace=False,
@@ -788,6 +807,7 @@ def subsample_open_shell(
     norb: int,
     num_elec_a: int,
     num_elec_b: int,
+    rng: np.random.Generator | None = None,
 ) -> tuple[NpStrict1DArrayLL, NpStrict1DArrayLL]:
     """Build separate alpha and beta CI string lists from bitstrings (open-shell / UHF).
 
@@ -818,6 +838,7 @@ def subsample_open_shell(
         subspace_dim=subspace_dim,
         norb=norb,
         num_elec=num_elec_a,
+        rng=rng,
     )
     ci_b = _subsample_one_spin(
         ci_strs=ci_strs_b,
@@ -826,6 +847,7 @@ def subsample_open_shell(
         subspace_dim=subspace_dim,
         norb=norb,
         num_elec=num_elec_b,
+        rng=rng,
     )
     return ci_a, ci_b
 
@@ -837,13 +859,15 @@ def _subsample_one_spin(
     subspace_dim: int,
     norb: int,
     num_elec: int,
+    rng: np.random.Generator | None = None,
 ) -> NpStrict1DArrayLL:
     """Dedup + carryover + HF-at-index-0 for a single spin channel.
 
     Mirrors the per-spin logic of :func:`subsample_close_shell` but operates on one spin's CI
     string integers and its own electron count and carryover, without averaging across spins.
     """
-    global MODULE_RNG
+    if rng is None:
+        rng = MODULE_RNG
 
     num_carryover = carryover.shape[0]
 
@@ -870,7 +894,7 @@ def _subsample_one_spin(
         mask = non_hf_mask & non_co_mask
         ci_strs_unique = ci_strs_unique[mask]
         ci_probs_unique = ci_probs_unique[mask]
-        new_strings = MODULE_RNG.choice(
+        new_strings = rng.choice(
             ci_strs_unique,
             size=num_new_samples,
             replace=False,

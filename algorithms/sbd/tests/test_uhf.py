@@ -169,3 +169,61 @@ def test_subsample_open_shell_independent_spins():
     assert len(set(ci_a.tolist())) == len(ci_a)
     assert len(set(ci_b.tolist())) == len(ci_b)
     assert not np.array_equal(ci_a, ci_b)
+
+
+def _draw_open_shell(seed, *, rng=None):
+    """Draw an alpha subspace large enough to exercise the rng.choice (random-pick) path.
+
+    norb=8 gives C(8,4)=70 possible halves per spin; with a small subspace_dim the unique pool
+    exceeds sqrt(subspace_dim), so the routine must randomly choose -- the branch the per-walker
+    rng controls. Returns the alpha CI string list.
+    """
+    from sbd import sqd
+
+    norb, na, nb = 8, 4, 4
+    bm_rng = np.random.default_rng(seed)
+    bm = bm_rng.integers(0, 2, size=(4000, 2 * norb)).astype(bool)
+    probs = np.ones(4000) / 4000
+    empty = np.empty((0, norb), dtype=bool)
+
+    ci_a, _ = sqd.subsample_open_shell.fn(
+        bitstring_matrix=bm,
+        probabilities=probs,
+        carryover_a=empty,
+        carryover_b=empty,
+        subspace_dim=400,  # sqrt = 20 << 70 unique halves -> rng.choice path is taken
+        norb=norb,
+        num_elec_a=na,
+        num_elec_b=nb,
+        rng=rng,
+    )
+    return ci_a
+
+
+def test_subsample_open_shell_per_walker_rng_independent():
+    """Different per-walker generators must draw DIFFERENT subspaces from the same samples.
+
+    Regression guard for the module-global MODULE_RNG that made concurrent walkers correlated (and
+    raced under the threaded task runner). The bitstring pool is fixed (same seed=7); only the
+    subsample generator differs between the two walkers.
+    """
+    ci_walker0 = _draw_open_shell(7, rng=np.random.default_rng(1000))
+    ci_walker1 = _draw_open_shell(7, rng=np.random.default_rng(2000))
+
+    # Same HF anchor, but the randomly chosen non-HF strings must differ between walkers.
+    assert ci_walker0[0] == ci_walker1[0]
+    assert not np.array_equal(ci_walker0, ci_walker1)
+
+
+def test_subsample_open_shell_rng_reproducible():
+    """Same per-walker seed -> identical draw (deterministic, resumable)."""
+    a = _draw_open_shell(7, rng=np.random.default_rng(42))
+    b = _draw_open_shell(7, rng=np.random.default_rng(42))
+    assert np.array_equal(a, b)
+
+
+def test_subsample_open_shell_rng_default_falls_back():
+    """rng=None must still work (legacy callers) via the module fallback generator."""
+    ci_a = _draw_open_shell(7, rng=None)
+    assert int(ci_a[0]) == (1 << 4) - 1  # HF anchored at index 0
+    assert len(set(ci_a.tolist())) == len(ci_a)
