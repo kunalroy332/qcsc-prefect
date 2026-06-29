@@ -35,6 +35,161 @@ recover_configurations = task(_recover_configurations)
 MODULE_RNG = np.random.default_rng(seed=1333)
 
 
+def _spin_halves_as_ints(
+    bitstrings: np.ndarray, norb: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Split (beta-left, alpha-right) bool bitstrings into per-spin integer strings.
+
+    Layout matches subsample_open_shell / recover_configurations: bits [:norb] are beta,
+    bits [norb:] are alpha; bit 0 is the most-significant in the printed string.
+    """
+    weights = (1 << np.arange(norb - 1, -1, -1)).astype(np.int64)
+    beta = (bitstrings[:, :norb].astype(np.int64) * weights).sum(axis=1)
+    alpha = (bitstrings[:, norb:].astype(np.int64) * weights).sum(axis=1)
+    return alpha, beta
+
+
+def _comprehensive_summary(
+    logger,
+    *,
+    raw_bitstrings: np.ndarray,
+    raw_probs: np.ndarray,
+    norb: int,
+    num_elec_a: int,
+    num_elec_b: int,
+    sqd_dim: int,
+    n_batches: int,
+    n_recovery_steps: int,
+    best_energy: float,
+    best_net_dim: int,
+    work_dir: str | None = None,
+    walker_tag: str = "",
+) -> None:
+    """Emit a comprehensive end-of-walker diagnostic: distinct-string counts, the sqd_dim mapping,
+    per-spin probability-weighted frequencies, a top-20 table, and (if matplotlib is available) a
+    saved bar plot of the top-20 string probabilities.
+
+    All quantities are derived from the raw measured pool (raw_bitstrings / raw_probs), so this
+    documents exactly what the device produced and how it maps into the diagonalized subspace.
+    """
+    n_total = int(raw_bitstrings.shape[0])
+    if n_total == 0:
+        logger.info("[summary]%s empty raw pool; nothing to summarize.", walker_tag)
+        return
+
+    probs = np.asarray(raw_probs, dtype=np.float64)
+    alpha_ints, beta_ints = _spin_halves_as_ints(raw_bitstrings, norb)
+    hf_a = (1 << num_elec_a) - 1
+
+    # Aggregate probability per distinct spin-half string (a half repeats across many full configs).
+    def _agg(ints: np.ndarray):
+        uniq, inv = np.unique(ints, return_inverse=True)
+        pw = np.zeros(uniq.size, dtype=np.float64)
+        np.add.at(pw, inv, probs)
+        order = np.argsort(pw)[::-1]
+        return uniq[order], pw[order]
+
+    a_uniq, a_pw = _agg(alpha_ints)
+    b_uniq, b_pw = _agg(beta_ints)
+
+    import math as _math
+
+    full_a = _math.comb(norb, num_elec_a)
+    full_b = _math.comb(norb, num_elec_b)
+    dets_per_spin = int(sqd_dim**0.5)
+
+    def _exc(x: int, ne: int) -> int:
+        hf = (1 << ne) - 1
+        return bin(int(x) ^ hf).count("1") // 2
+
+    logger.info("[summary]%s ================= COMPREHENSIVE WALKER SUMMARY =================",
+                walker_tag)
+    logger.info("[summary]%s system: norb=%d nelec=(%d,%d)  |  best_energy=%.6f",
+                walker_tag, norb, num_elec_a, num_elec_b, best_energy)
+    logger.info("[summary]%s raw pool: %d measured configs, %d distinct full configs",
+                walker_tag, n_total, int(np.unique(raw_bitstrings, axis=0).shape[0]))
+    logger.info(
+        "[summary]%s distinct ALPHA strings seen: %d / %d possible (%.3f%%)  |  "
+        "distinct BETA strings seen: %d / %d possible (%.3f%%)",
+        walker_tag, a_uniq.size, full_a, 100.0 * a_uniq.size / full_a,
+        b_uniq.size, full_b, 100.0 * b_uniq.size / full_b,
+    )
+    logger.info(
+        "[summary]%s sqd_dim=%d -> sqrt=%d dets/spin -> net CI matrix = %d x %d = %d "
+        "(kept top %d of %d distinct alpha, top %d of %d distinct beta per batch); "
+        "n_batches=%d, n_recovery_steps=%d, achieved net_dim=%d",
+        walker_tag, sqd_dim, dets_per_spin, dets_per_spin, dets_per_spin,
+        dets_per_spin * dets_per_spin,
+        min(dets_per_spin, a_uniq.size), a_uniq.size,
+        min(dets_per_spin, b_uniq.size), b_uniq.size,
+        n_batches, n_recovery_steps, best_net_dim,
+    )
+    # Probability mass captured by the top dets_per_spin strings (what one batch can hold).
+    a_top_mass = float(a_pw[:dets_per_spin].sum())
+    b_top_mass = float(b_pw[:dets_per_spin].sum())
+    logger.info(
+        "[summary]%s probability mass in top-%d strings: alpha=%.4f beta=%.4f  "
+        "(alpha p: max=%.2e median=%.2e min=%.2e)",
+        walker_tag, dets_per_spin, a_top_mass, b_top_mass,
+        float(a_pw[0]), float(np.median(a_pw)), float(a_pw[-1]),
+    )
+
+    # Top-20 ALPHA strings table.
+    top = min(20, a_uniq.size)
+    logger.info("[summary]%s top-%d ALPHA strings by probability:", walker_tag, top)
+    logger.info("[summary]%s   rank  bitstring%s  prob       exc  (HF=%0*d)",
+                walker_tag, " " * max(0, norb - 9), norb, hf_a)
+    for i in range(top):
+        s = format(int(a_uniq[i]), f"0{norb}b")
+        logger.info("[summary]%s   %4d  %s  %.4e  %3d", walker_tag, i + 1, s,
+                    float(a_pw[i]), _exc(int(a_uniq[i]), num_elec_a))
+    # Top-20 BETA strings table.
+    topb = min(20, b_uniq.size)
+    logger.info("[summary]%s top-%d BETA strings by probability:", walker_tag, topb)
+    for i in range(topb):
+        s = format(int(b_uniq[i]), f"0{norb}b")
+        logger.info("[summary]%s   %4d  %s  %.4e  %3d", walker_tag, i + 1, s,
+                    float(b_pw[i]), _exc(int(b_uniq[i]), num_elec_b))
+
+    # Optional plot of the top-20 alpha/beta probabilities, saved next to the work dir.
+    try:
+        import os
+
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        for ax, uniq, pw, label, ne in (
+            (axes[0], a_uniq, a_pw, "alpha", num_elec_a),
+            (axes[1], b_uniq, b_pw, "beta", num_elec_b),
+        ):
+            k = min(20, uniq.size)
+            labels = [format(int(uniq[i]), f"0{norb}b") for i in range(k)]
+            colors = [
+                "#2c3e50" if _exc(int(uniq[i]), ne) == 0
+                else ("#27ae60" if _exc(int(uniq[i]), ne) <= 2 else "#c0392b")
+                for i in range(k)
+            ]
+            ax.bar(range(k), pw[:k], color=colors)
+            ax.set_xticks(range(k))
+            ax.set_xticklabels(labels, rotation=90, fontsize=5, family="monospace")
+            ax.set_ylabel("aggregated probability")
+            ax.set_title(f"top-{k} {label} strings (HF=navy, S/D=green, >2exc=red)")
+        fig.tight_layout()
+        out_dir = work_dir if work_dir and os.path.isdir(work_dir) else "."
+        out = os.path.join(out_dir, f"summary_top20{walker_tag.replace(' ', '_') or ''}.png")
+        fig.savefig(out, dpi=130)
+        plt.close(fig)
+        logger.info("[summary]%s top-20 probability plot saved: %s", walker_tag, out)
+    except Exception as exc:  # plotting is best-effort; never fail the run on it
+        logger.info("[summary]%s plot skipped (%s: %s)", walker_tag,
+                    type(exc).__name__, str(exc)[:120])
+
+    logger.info("[summary]%s ===============================================================",
+                walker_tag)
+
+
 def _excitation_summary(ci_strings: np.ndarray, num_elec: int) -> str:
     """Summarize a determinant list by excitation level from Hartree-Fock.
 
@@ -484,6 +639,27 @@ def walker_sqd(
         avg_occ = (step_occ_a, step_occ_b)
 
     logger.debug("Completed configuration recovery loop.")
+
+    # Comprehensive end-of-walker summary: distinct-string counts, sqd_dim mapping, per-spin
+    # probability frequencies, a top-20 table, and a saved top-20 plot. Best-effort; never fails.
+    try:
+        _comprehensive_summary(
+            logger,
+            raw_bitstrings=raw_bitstrings,
+            raw_probs=raw_probs,
+            norb=norb,
+            num_elec_a=num_elec_a,
+            num_elec_b=num_elec_b,
+            sqd_dim=sqd_dim,
+            n_batches=n_batches,
+            n_recovery_steps=n_recovery_steps,
+            best_energy=float(best_energy),
+            best_net_dim=best_net_dim,
+            work_dir=getattr(davidson_solver, "root_dir", None),
+            walker_tag=f" #{trial_index:02d}-{walker_index}",
+        )
+    except Exception as exc:  # diagnostics must never break the actual calculation
+        logger.info("[summary] skipped (%s: %s)", type(exc).__name__, str(exc)[:160])
     telemetry.update(
         num_post_determinants=best_num_post,
         net_subspace_dim=best_net_dim,
