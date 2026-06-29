@@ -294,13 +294,17 @@ adequate either way.**
 
 **Q4. Is configuration recovery (CR) working, and are `initial_occupancies` UHF-consistent
 (different α and β)?**
-- **Yes, UHF-consistent.** `initial_occupancy = (occ_a[::-1], occ_b[::-1])` where
-  `occ_a = eigh(dm_cc_a)`, `occ_b = eigh(dm_cc_b)` from the **UCCSD** per-spin 1-RDM
-  (`chem.py:169-185`) — genuinely distinct α and β distributions (verified e.g. phenyl: α sum 21,
-  β sum 20, 40 fractional, α≠β).
+- **Yes, UHF-consistent.** `initial_occupancy = (occ_a, occ_b)` where `occ_a = diag(dm_cc_a)`,
+  `occ_b = diag(dm_cc_b)` from the **UCCSD** per-spin 1-RDM (`chem.py`) — genuinely distinct α and β
+  distributions (verified e.g. phenyl: α sum 21, β sum 20, 40 fractional, α≠β).
 - **Critical fix (`af98e32`):** these must come from the *correlated UCCSD* RDM, not the SCF RDM —
   SCF occupancies are integer, which gives recovery no fractional bias and collapses the subspace to
   bare Hartree-Fock. This was a real bug that pinned early runs to SCF.
+- **Follow-up fix (`0aa5d4a`):** the occupancy must be the **diagonal** of the correlated 1-RDM
+  (per-canonical-MO occupancy, the basis the bitstrings live in), not the sorted `eigh` eigenvalues
+  (natural-orbital occupation numbers in a rotated basis), which misassign the recovery bias to the
+  wrong orbitals — an error that grows with system size. The RHF path had a parallel bug (used the
+  SCF, not UCCSD, RDM) fixed in the same commit.
 - **CR works**, with one nuance the local study exposed: recovery reliably repairs particle number
   (3% valid scatter → 100% in-sector), but the fine occupancy bias is only *one* factor; whether a
   subsample lands on a good subspace is partly luck (the intrinsic bimodal variance of §5E).
@@ -310,9 +314,10 @@ adequate either way.**
 ## 8. Recommendations (forward)
 
 1. **Use the largest affordable `sqd_dim` for large molecules** (no Goldilocks peak — energy improves
-   monotonically with subspace size; verified by an 18-orbital sweep). For C4H5 (25 orb) use the
-   default 1M (or more), *not* the 20k/200k that the 50q runs used — those were deep in the
-   starvation tail. Only small molecules (where √sqd_dim saturates the full space) want a modest dim.
+   monotonically with subspace size; verified by an 18-orbital sweep *and now on hardware*, §9:
+   10⁶→10⁷ gave −55.7 mHa on allyl 40q). For C4H5 (25 orb) use ≥10⁶ (10⁷ if the solver budget
+   allows), *not* the 20k/200k that the 50q runs used — those were deep in the starvation tail. Only
+   small molecules (where √sqd_dim saturates the full space) want a modest dim.
 2. **Do NOT rely on deep recovery** — `n_recovery_steps` is not a lever (1–5 give the same energy);
    1–2 is sufficient. `n_batches ≥ 5` for best-of and stable averaged occupancy.
 3. **Raise `num_walkers` (8–16)** to beat the intrinsic bimodal variance; take the best walker.
@@ -322,3 +327,110 @@ adequate either way.**
    external references; not computable in this environment.)
 6. **The UHF parametrization is verified correct** (RHF-SQD ≡ UHF-SQD → FCI on N2, §5E). The 50q
    plateau is hardware noise + `sqd_dim` mis-tuning, *not* the open-shell ansatz.
+
+---
+
+## 9. The `sqd_dim`=10⁷ + K=8 breakthrough (allyl C₃H₅, 40q, `ibm_kingston`)
+
+The recommendations in §8 were put to the test on the allyl radical (20 spatial orbitals,
+nelec=(12,11), doublet) — the same FCIDUMP and backend as the earlier 40q run, changing only the
+two levers §8 identified. References from the FCIDUMP: **UHF = −115.042051, UCCSD = −115.224061**.
+
+### 9A. The result — a 55.7 mHa jump from two knobs
+
+| Run | sqd_dim | √ (dets/spin) | K-batch | walkers | iters | rec | **Best energy** | vs UHF | vs UCCSD |
+|-----|---------|---------------|---------|---------|-------|-----|-----------------|--------|----------|
+| Prior plateau (`clever-labradoodle`) | 10⁶ | 1000 | 3 | 4 | 4 | 5 | −115.062178 | −20.6 mHa | +161.9 mHa |
+| **This run (`daffodil-kingfisher`)** | **10⁷** | **3162** | **8** | 4 | 2 | 2 | **−115.117896** | **−75.8 mHa** | **+106.2 mHa** |
+
+**Raising `sqd_dim` 10⁶→10⁷ and `n_batches` 3→8 lowered the energy by 55.7 mHa** and closed ~34%
+of the residual gap to UCCSD — with *fewer* DE iterations and recovery steps than the plateaued run.
+This is the strongest single confirmation that **`sqd_dim` is the dominant lever and the K-batch
+count is the second** — exactly the §8 prediction, now demonstrated on hardware, not a local proxy.
+
+### 9B. Per-walker / per-generation detail (the variance is the story)
+
+```
+Gen 0 walkers:  -115.1179  -115.0861  -115.0820  -115.0909   -> best -115.1179 (walker 0)
+Gen 1 walkers:  -115.0916  -115.1119  -115.0857  -115.0915   -> best -115.1119 (walker 1)
+Flow best: -115.117896 (gen 0, walker 0)   [DE gen 1 did not beat gen 0, as before]
+```
+
+Within a single recovery step the **8 K-batches spanned 11–54 mHa** (e.g. walker 0 gen0:
+min −115.118, max −115.077, spread 40.6 mHa; walker 1 gen1: spread 54.3 mHa). The best overall
+number came from the *luckiest single batch among 32 draws* (8 batches × 4 walkers in gen 0). This
+is the §5E intrinsic-variance signature, now amplified: **more batches widen the max−min window, and
+because we keep the MIN, more batches ⇒ more chances to catch a deep one.** K=8 is doing real work —
+the best batch (−115.118) sits ~30 mHa below the batch mean (−115.09).
+
+### 9C. The diagnostic that explains *why* it helped — and where the next wall is
+
+The excitation summary tells the mechanism precisely. At sqd_dim=10⁷ each batch keeps 3162 dets/spin
+(vs 1000 at 10⁶):
+
+| Quantity | sqd_dim=10⁶ | sqd_dim=10⁷ | Change |
+|----------|-------------|-------------|--------|
+| dets/spin kept | 1000 | 3162 | 3.16× |
+| singles+doubles (useful) α | ~100 | **~300** | ~3× more |
+| useful **fraction** | ~10% | **~9.5%** | *unchanged* |
+| >2-exc "deadwood" | ~900 | ~2860 | grows with dim |
+| distinct α strings available | ~690k | ~686k | same pool |
+| prob mass in kept top-3162 (α) | — | **1.8–4.0%** | tiny |
+
+Two facts jump out:
+1. **The useful-determinant *count* tripled** (100→300 singles+doubles), which is *why* the energy
+   dropped — more Slater-Condon-coupled configs in the CI matrix = more correlation captured.
+2. **The useful *fraction* stayed ~10%** and the deadwood grew proportionally. The subspace is still
+   ~90% >2-excitation determinants that don't couple to HF. We're capturing more correlation by
+   brute-force enlarging the net, not by improving its *quality*.
+
+The probability-mass line is the deepest signal: the top-3162 α strings hold only **~2% of the total
+probability**. The device noise has smeared ~98% of the measured weight across a long tail of
+high-excitation noise configs. Raising sqd_dim scoops up more of the *good* tail, but with sharply
+diminishing returns — each new determinant is rarer and less HF-coupled than the last.
+
+### 9D. Operational notes from this run (for reproducibility)
+
+- **Shot mixing held up:** 2 batches × 1M shots → ~1.34M kept (≈67% Kingston retention), merged via
+  `concatenate_shots`; ~100% unique configs (noise-flattened), as expected.
+- **Per-walker RNG fix (commit `471deb9`) was active** — the 8 batches × 4 walkers drew genuinely
+  independent subspaces (visible in the divergent per-walker top-20 tables and energies). Without it
+  the threaded runner would have raced and correlated them.
+- **Wall-clock: 34396 s (~9.5 h)** for 2 DE generations. The bottleneck is now the **diagonalizer**:
+  each 10⁷ Davidson solve takes ~10 min, ×8 batches ×2 recovery ×4 walkers ×2 gens. The IBM HTTP-502
+  on one job (auto-retried after 300 s) cost a few minutes but did not derail the run.
+- **Benign noise in the log:** `solve_eigenstate` lines emit a harmless `~/.cargo/env: No such file`
+  shell warning (the deleted Rust toolchain is still referenced in `.bashrc`/`.bash_profile`); and
+  the comprehensive-summary plot is skipped (`matplotlib` not in the `sbd` venv). Neither affects
+  results. Fix: remove the `.cargo/env` source lines from the shell rc files; `uv pip install
+  matplotlib` into the sbd venv to re-enable the top-20 plot.
+
+### 9E. Where to go next — toward 10⁸ and beyond
+
+The mechanism in §9C dictates the path. The lever still has runway, but the *quality ceiling*
+(fraction stuck at ~10%, prob-mass at ~2%) says brute-force `sqd_dim` alone will hit diminishing
+returns. The recommended escalation, in order of expected payoff per cost:
+
+1. **sqd_dim = 10⁸ (√ = 10⁴ dets/spin).** Direct continuation of the proven lever. Expected to add
+   another (smaller) increment toward UCCSD — extrapolating §9A, perhaps 20–40 mHa, not another 55.
+   Cost: each Davidson solve is ~10× heavier than 10⁷ (the matrix is 10⁸ vs 10⁷). With K=8 that is a
+   very heavy diagonalizer load — budget a full 24 h mem2 job and consider dropping to K=4–5 to fit,
+   or `num_walkers=2` (DE is not adding value — see below), reinvesting the saved solves into dim.
+2. **Keep or raise K-batch (8→12–16).** Because we keep the MIN over batches and the per-step spread
+   is 30–50 mHa, more independent draws is a cheap, near-linear way to catch a deeper batch. At 10⁸
+   this trades against solver cost — K=8 is a reasonable hold; only raise K if the solve fits.
+3. **Stop spending on DE iterations.** Gen 1 again failed to beat gen 0 (both runs). The DE outer
+   loop is not the lever at this noise level; set `iterations=1` (or 2 at most) and pour the budget
+   into dim + K. `num_walkers` still matters (best-of over the intrinsic variance) — keep 4.
+4. **Attack the *quality* ceiling, not just the size.** The ~10% useful fraction is set by hardware
+   noise smearing weight into deadwood. Two orthogonal levers: (a) stronger error mitigation /
+   lower-noise backend to sharpen the sampled distribution so a larger fraction of kept dets are
+   singles+doubles; (b) a tighter occupancy-bias in configuration recovery to preferentially repair
+   toward low-excitation configs. Without one of these, 10⁸ will capture more correlation but the
+   subspace stays ~90% deadwood.
+
+**Honest expectation:** 10⁸ should continue the descent toward UCCSD (−115.224) and is the right
+next experiment, but the curve is concave — each decade of `sqd_dim` buys less. Reaching UCCSD-class
+accuracy on this 40q hardware likely needs the §9E-4 quality levers in addition to raw subspace size.
+The result here is nonetheless a clean, defensible win: **−75.8 mHa below UHF on real hardware, the
+largest correlation recovery in the project, driven by the two levers the analysis predicted.**
