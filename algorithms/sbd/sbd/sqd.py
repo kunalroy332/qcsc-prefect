@@ -334,6 +334,7 @@ def walker_sqd(
         batch_carryover = None  # carryover of the best (lowest-energy) batch
         batch_net_dim = 0
         batch_save_kwargs: dict = {}
+        batch_energies: list[float] = []  # every batch's total energy, for a min/mean/std summary
         occ_a_accum = np.zeros(norb, dtype=np.float64)
         occ_b_accum = np.zeros(norb, dtype=np.float64)
 
@@ -401,6 +402,7 @@ def walker_sqd(
                 this_save_kwargs = dict(alphadets=ci_strings)
 
             this_energy = sbd_result.energy + elec_props.nuclear_repulsion_energy
+            batch_energies.append(float(this_energy))
             # Accumulate occupancies (averaged over batches -> next recovery pass).
             occ_a_accum += np.asarray(sbd_result.orbital_occupancies[0], dtype=np.float64)
             occ_b_accum += np.asarray(sbd_result.orbital_occupancies[1], dtype=np.float64)
@@ -415,6 +417,19 @@ def walker_sqd(
                 batch_carryover = this_carryover
                 batch_net_dim = this_net_dim
                 batch_save_kwargs = this_save_kwargs
+
+        # [diag] report BOTH the reported (min) energy and the across-batch spread. The min is the
+        # variational estimate we keep; the spread shows how lucky the best draw was and the K-batch
+        # variance (large std => more batches / larger sqd_dim would likely help).
+        if batch_energies:
+            _be = np.asarray(batch_energies, dtype=np.float64)
+            logger.info(
+                "[diag] recovery %d/%d batch energies: min=%.6f mean=%.6f max=%.6f std=%.6f "
+                "spread=%.1f mHa (n=%d)",
+                recovery_step + 1, n_recovery_steps,
+                float(_be.min()), float(_be.mean()), float(_be.max()), float(_be.std()),
+                float((_be.max() - _be.min()) * 1000.0), _be.size,
+            )
 
         energy = batch_energy
         step_carryover = batch_carryover
