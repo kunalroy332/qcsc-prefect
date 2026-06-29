@@ -4,7 +4,6 @@ import io
 from typing import Annotated
 
 import numpy as np
-import scipy
 from prefect import get_run_logger, task
 from pydantic import BaseModel
 from pydantic_numpy.helper.annotation import NpArrayPydanticAnnotation
@@ -94,11 +93,15 @@ def _build_property(
     mycc.kernel()
     t2 = mycc.t2
 
-    # Diagonalize RDM to obtain the occupancies
-    # Eigenvectors are the natual molecular orbitals
-    rdm1_ccsd = mf.make_rdm1()
-    occ_ccsd, _ = scipy.linalg.eigh(rdm1_ccsd)
-    occ_ccsd /= 2.0
+    # Per-MO occupancies for configuration recovery. recover_configurations expects the mean
+    # occupancy of MO p IN THE BASIS THE BITSTRINGS LIVE IN (the canonical MO basis the circuit and
+    # integrals use), i.e. the DIAGONAL of the 1-RDM in that basis -- NOT the sorted eigenvalues
+    # (natural-orbital occupation numbers in a different basis), which would misassign the bias to
+    # the wrong orbitals. The RDM must come from the *correlated* CCSD (mycc), not the SCF object
+    # (mf.make_rdm1() is idempotent -> integer 0/1 occupancies, which give recovery no fractional
+    # signal and collapse the SQD subspace to bare Hartree-Fock).
+    rdm1_ccsd = mycc.make_rdm1()
+    occ_ccsd = np.diag(rdm1_ccsd) / 2.0  # spatial-orbital occ (0-2) -> per-spin (0-1)
 
     # Get PySCF logs dumped into in-memory buffer
     get_run_logger().info(buf.getvalue())
@@ -107,7 +110,7 @@ def _build_property(
         one_body_tensor=h1,
         two_body_tensor=h2,
         t2=t2,
-        initial_occupancy=(occ_ccsd[::-1], occ_ccsd[::-1]),
+        initial_occupancy=(occ_ccsd, occ_ccsd),
         nuclear_repulsion_energy=nuclear_repulsion_energy,
         num_orbitals=norb,
         num_electrons=(num_elec_a, num_elec_b),
@@ -166,9 +169,15 @@ def _build_property_uhf(
     # bitstrings toward the physically important (near-HF) configurations. The UHF *SCF* RDM is
     # (often) idempotent -> integer 0/1 occupancies, which give recovery no signal and collapse
     # the SQD subspace to bare Hartree-Fock. UCCSD make_rdm1() returns (dm_a, dm_b) in MO basis.
+    # Use the DIAGONAL (per-canonical-MO occupancy) of the correlated UCCSD 1-RDM, not the sorted
+    # eigenvalues. The bitstrings are measured in the canonical MO basis (PrepareHartreeFockJW +
+    # integrals from mf.mo_coeff), so recover_configurations needs occ of MO p in THAT basis; the
+    # eigenvalues are natural-orbital occupation numbers in a rotated basis and, once sorted, would
+    # misassign the bias to the wrong orbitals (the error lands on the active, partially-occupied
+    # orbitals and grows with system size).
     dm_cc_a, dm_cc_b = mycc.make_rdm1()
-    occ_a, _ = scipy.linalg.eigh(dm_cc_a)
-    occ_b, _ = scipy.linalg.eigh(dm_cc_b)
+    occ_a = np.diag(dm_cc_a)
+    occ_b = np.diag(dm_cc_b)
 
     # Get PySCF logs dumped into in-memory buffer
     get_run_logger().info(buf.getvalue())
@@ -182,7 +191,7 @@ def _build_property_uhf(
         two_body_tensor_bb=h2_bb,
         t2_ab=t2_ab,
         t2_bb=t2_bb,
-        initial_occupancy=(occ_a[::-1], occ_b[::-1]),
+        initial_occupancy=(occ_a, occ_b),
         nuclear_repulsion_energy=nuclear_repulsion_energy,
         num_orbitals=norb,
         num_electrons=(num_elec_a, num_elec_b),
