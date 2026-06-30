@@ -30,10 +30,22 @@ class SBDResult:
     """The 2D array of bool representations of carryover bitstrings."""
 
     rdm1: np.ndarray | None = None
-    """Spin-summed 1-particle reduced density matrix."""
+    """Alpha 1-particle reduced density matrix (L x L). Populated only when the solver is run with
+    RDM output enabled (``do_rdm != 0``); None otherwise. For RHF this is the (single-spin) 1-RDM;
+    for UHF it is the alpha block and ``rdm1_b`` holds beta."""
 
     rdm2: np.ndarray | None = None
-    """Spin-summed 2-particle reduced density matrix."""
+    """Alpha-alpha 2-particle reduced density matrix (L x L x L x L). Populated only with RDM
+    output. For UHF the mixed and beta-beta blocks live in ``rdm2_ab`` / ``rdm2_bb``."""
+
+    rdm1_b: np.ndarray | None = None
+    """Beta 1-RDM (UHF only)."""
+
+    rdm2_ab: np.ndarray | None = None
+    """Mixed alpha-beta 2-RDM block (UHF only)."""
+
+    rdm2_bb: np.ndarray | None = None
+    """Beta-beta 2-RDM block (UHF only)."""
 
     carryover_bitstrings_b: np.ndarray | None = None
     """Beta carryover bitstrings (UHF only). None for RHF; alpha lives in carryover_bitstrings."""
@@ -210,7 +222,7 @@ def _build_solver_args(solver: "SBDSolverJob") -> list[str]:
         "--dump_matrix_form_wf",
         "matrixformwf.txt",
         "--rdm",
-        "0",
+        str(solver.do_rdm),
     ]
     if solver.solver_mode == "gpu":
         args.extend(["--adetfile", "AlphaDets.bin", "--carryoverfile", "carryover.txt"])
@@ -418,6 +430,17 @@ class SBDSolverJob(Block):
         le=1.0,
         title="Carryover Ratio",
         description="Ratio of bitstrings retained as carryover candidates.",
+    )
+    do_rdm: int = Field(
+        default=0,
+        ge=0,
+        title="RDM Output",
+        description=(
+            "Passed to the solver as --rdm. 0 (default) computes only the diagonal 1-RDM used for "
+            "configuration recovery -- byte-identical to prior behavior. Nonzero makes the solver "
+            "build the full one- and two-particle RDMs (alpha/beta one-body, aa/ab/ba/bb two-body) "
+            "and write them to disk for downstream orbital optimization."
+        ),
     )
     solver_mode: Literal["cpu", "gpu", "fugaku"] = Field(
         default="cpu",
