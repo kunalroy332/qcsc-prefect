@@ -219,11 +219,14 @@ def _build_solver_args(solver: "SBDSolverJob") -> list[str]:
         str(solver.tolerance),
         "--carryover_ratio",
         str(solver.carryover_ratio),
-        "--dump_matrix_form_wf",
-        "matrixformwf.txt",
         "--rdm",
         str(solver.do_rdm),
     ]
+    # NOTE: --dump_matrix_form_wf (which wrote matrixformwf.txt) is intentionally NOT passed. That
+    # dump serializes the full CI wavefunction as text and is never consumed by the pipeline; at
+    # large sqd_dim it is catastrophic (e.g. ~31 GB per walker at sqd_dim=5e8, which stalled the
+    # solver on Lustre I/O until it hit the wall-time limit before finishing the diagonalization).
+    # The solver skips the dump when the flag is absent (sbdiag.h: only writes if the path != "").
     if solver.solver_mode == "gpu":
         args.extend(["--adetfile", "AlphaDets.bin", "--carryoverfile", "carryover.txt"])
     if solver.method == "uhf":
