@@ -342,7 +342,23 @@ def walker_sqd(
             if circuit_params.use_reset_mitigation:
                 test_bits = pub_result[0].data.test
                 kept = meas_bits.get_bitstrings(test_bits.bitcount() == 0)
-                batch_array = BitArray.from_samples(kept, num_bits=meas_bits.num_bits)
+                if len(kept) == 0:
+                    # The reset-test register rejected every shot in this batch. This is expected on
+                    # mock/simulator backends that do not model the reset ancilla; on real hardware
+                    # it would mean a wholly failed batch. Either way, an empty batch must not crash
+                    # the flow (BitArray.from_samples([]) raises), so fall back to the unmitigated
+                    # shots for this batch and warn.
+                    logger.warning(
+                        "Reset mitigation kept 0/%d shots on %s (shot batch %d/%d); "
+                        "falling back to unmitigated shots for this batch.",
+                        meas_bits.num_shots,
+                        runtime.resource_name,
+                        shot_batch + 1,
+                        n_shot_batches,
+                    )
+                    batch_array = meas_bits
+                else:
+                    batch_array = BitArray.from_samples(kept, num_bits=meas_bits.num_bits)
             else:
                 batch_array = meas_bits
             batch_arrays.append(batch_array)
