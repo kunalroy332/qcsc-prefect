@@ -277,6 +277,15 @@ def mutation_and_crossover(
     global MODULE_RNG
     num_walkers, num_params = current_populations.shape
 
+    if num_walkers < 4:
+        # Each mutant draws 4 distinct other walkers (a - b + c - d); this is undefined below 4.
+        # num_walkers < 4 is only allowed for a single evaluation pass (iterations = 1), which
+        # never reaches this function, so reaching here with < 4 is a misconfiguration.
+        raise ValueError(
+            "Differential-evolution mutation requires num_walkers >= 4 "
+            f"(got {num_walkers}); use iterations = 1 for a single-walker evaluation pass."
+        )
+
     mutant = np.zeros_like(current_populations, dtype=np.float64)
     for i in range(num_walkers):
         r1, r2, r3, r4 = MODULE_RNG.choice(

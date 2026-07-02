@@ -64,9 +64,13 @@ class DEParameters(BaseModel):
 
     num_walkers: int = Field(
         default=4,
-        description="Number of populations for differential evoluation.",
+        description=(
+            "Number of populations for differential evolution. "
+            "Differential-evolution mutation (iterations > 1) needs at least 4 walkers; "
+            "a single evaluation pass (iterations = 1, e.g. a recovery-depth test) accepts 1."
+        ),
         title="Walkers",
-        ge=4,
+        ge=1,
     )
 
     iterations: int = Field(
