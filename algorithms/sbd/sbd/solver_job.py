@@ -219,6 +219,8 @@ def _build_solver_args(solver: "SBDSolverJob") -> list[str]:
         str(solver.tolerance),
         "--carryover_ratio",
         str(solver.carryover_ratio),
+        "--carryover_type",
+        str(solver.carryover_type),
         "--rdm",
         str(solver.do_rdm),
     ]
@@ -432,7 +434,24 @@ class SBDSolverJob(Block):
         gt=0.0,
         le=1.0,
         title="Carryover Ratio",
-        description="Ratio of bitstrings retained as carryover candidates.",
+        description=(
+            "Ratio of bitstrings retained as carryover candidates (used when carryover_type>0)."
+        ),
+    )
+    carryover_type: int = Field(
+        default=0,
+        ge=0,
+        le=3,
+        title="Carryover Type",
+        description=(
+            "Passed to the solver as --carryover_type. The solver only computes and writes the "
+            "carryover determinant lists (carryover.bin / carryover_b.bin) when this is nonzero; "
+            "0 (default) disables carryover entirely, matching all prior runs where the files came "
+            "out empty. 1 = keep the top carryover_ratio fraction of each spin's determinants by "
+            "weight; 2 = type 1 plus a singles extension of the kept set; 3 = singles extension of "
+            "the whole wavefunction by carryover_threshold. Use >=1 (with n_recovery_steps>=2) to "
+            "actually carry dominant determinants across recovery passes."
+        ),
     )
     do_rdm: int = Field(
         default=0,
