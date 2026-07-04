@@ -96,6 +96,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--tolerance", type=float)
     parser.add_argument("--carryover-ratio", type=float)
     parser.add_argument("--carryover-type", type=int)
+    parser.add_argument("--solver-timeout-seconds", type=float)
     parser.add_argument("--solver-mode", choices=["cpu", "gpu", "fugaku"])
     parser.add_argument("--method", choices=["rhf", "uhf"])
     parser.add_argument("--shots", type=int)
@@ -287,6 +288,7 @@ def _env_values() -> dict[str, Any]:
         "tolerance": env_float("SBD_TOLERANCE"),
         "carryover_ratio": env_float("SBD_CARRYOVER_RATIO"),
         "carryover_type": env_int("SBD_CARRYOVER_TYPE"),
+        "solver_timeout_seconds": env_float("SBD_SOLVER_TIMEOUT_SECONDS"),
         "solver_mode": env_first_str("SBD_SOLVER_MODE"),
         "method": env_first_str("SBD_METHOD"),
         "shots": env_int("SBD_SHOTS"),
@@ -447,6 +449,17 @@ def main() -> None:
     carryover_type = int(
         _pick_value(
             args.carryover_type, config.get("carryover_type"), env.get("carryover_type"), 0
+        )
+    )
+    # Total budget (queue wait + solve) the executor allows a single diag job. Raise this well
+    # above the ~2h solve time when submitting to a congested queue (e.g. 2025-node large-queue
+    # jobs) so the flow does not WaitTimeout while the job is still pending. Default 7200s.
+    solver_timeout_seconds = float(
+        _pick_value(
+            args.solver_timeout_seconds,
+            config.get("solver_timeout_seconds"),
+            env.get("solver_timeout_seconds"),
+            7200.0,
         )
     )
     solver_mode = str(
@@ -616,6 +629,7 @@ def main() -> None:
         tolerance=tolerance,
         carryover_ratio=carryover_ratio,
         carryover_type=carryover_type,
+        timeout_seconds=solver_timeout_seconds,
         solver_mode=solver_mode,
         method=method,
         user_args=user_args,
