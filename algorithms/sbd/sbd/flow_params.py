@@ -153,11 +153,12 @@ class FlowParameters(BaseModel):
         ge=1,
     )
 
-    quantum_source: Literal["real-device", "random"] = Field(
+    quantum_source: Literal["real-device", "random", "saved"] = Field(
         default="real-device",
         description=(
-            "Select whether SQD sampling uses IBM Quantum Runtime "
-            "or deterministic random bitstrings."
+            "Select the SQD sample source: 'real-device' (IBM Quantum Runtime), "
+            "'random' (deterministic random bitstrings), or 'saved' (reload a previously "
+            "persisted sample pool and diagonalize offline, no IBM call)."
         ),
         title="Quantum Source",
     )

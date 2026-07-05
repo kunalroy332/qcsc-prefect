@@ -19,7 +19,7 @@ from qiskit_addon_sqd.configuration_recovery import (
 )
 from qiskit_addon_sqd.counts import bit_array_to_arrays, generate_bit_array_uniform
 
-from .data_io import save_ndarray
+from .data_io import load_ndarray, save_ndarray
 from .flow_params import CircuitParameters
 from .lucj import create_lucj_circuit
 from .np_type_extension import (
@@ -384,6 +384,44 @@ def walker_sqd(
         # Update application telemetry (aggregate retention over all batches).
         telemetry.update(
             shot_retention_rate=float(kept_shot_total / raw_shot_total) if raw_shot_total else 0.0,
+        )
+
+        # Persist the merged sample pool ONCE, before any diagonalization, so this (expensive,
+        # real-hardware) sample can be re-diagonalized later without re-sampling. Best-effort:
+        # a failed save must never abort a hardware run. Reload with quantum_source="saved".
+        try:
+            pool_path = save_ndarray(
+                file_prefix=f"raw_samples_t{trial_index:02d}_w{walker_index}",
+                packed_bits=bit_array.array,
+                num_bits=np.array([bit_array.num_bits], dtype=np.int64),
+                num_shots=np.array([bit_array.num_shots], dtype=np.int64),
+            )
+            telemetry["raw_samples_path"] = pool_path
+            logger.info(
+                "[persist] merged %d-shot pool (trial %d walker %d) saved: %s",
+                int(bit_array.num_shots), trial_index, walker_index, pool_path,
+            )
+        except Exception:
+            logger.exception("[persist] failed to save merged sample pool (continuing).")
+    elif quantum_source == "saved":
+        # Reload a previously persisted merged pool and diagonalize from it — no IBM call, no
+        # credentials. options["saved_samples"] is a per-walker list of saved-artifact paths (the
+        # file://... or S3 keys returned by the persist step above).
+        saved_paths = options.get("saved_samples")
+        if not saved_paths or walker_index >= len(saved_paths):
+            raise RuntimeError(
+                "quantum_source='saved' but no saved_samples path for walker "
+                f"{walker_index} (got {saved_paths!r}). Set --saved-samples-dir / "
+                "SBD_SAVED_SAMPLES_DIR to the persisted pool(s)."
+            )
+        pool_path = saved_paths[walker_index]
+        logger.info("Loading saved sample pool for walker %d: %s", walker_index, pool_path)
+        packed = load_ndarray(pool_path, "packed_bits")
+        num_bits = int(load_ndarray(pool_path, "num_bits")[0])
+        bit_array = BitArray(packed, num_bits)
+        logger.info(
+            "[saved] loaded %d-shot pool (%d bits) from %s",
+            int(bit_array.num_shots), num_bits, pool_path,
         )
     else:
         # Random sampling

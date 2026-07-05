@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -108,6 +109,16 @@ def _parse_args() -> argparse.Namespace:
             "Split the quantum sampling into this many sampler jobs of shots//N each and mix them "
             "(BitArray.concatenate_shots), to reach a large effective shot count without one huge "
             "IBM job. 1 = single submission (default)."
+        ),
+    )
+    parser.add_argument(
+        "--saved-samples",
+        dest="saved_samples",
+        nargs="+",
+        help=(
+            "Diagonalize from persisted sample pool(s) instead of sampling. One saved-artifact path "
+            "per walker (the file://... or S3 key printed by a prior real-device run's [persist] "
+            "line). Requires quantum_source='saved'. No IBM call is made."
         ),
     )
     parser.add_argument(
@@ -293,6 +304,7 @@ def _env_values() -> dict[str, Any]:
         "method": env_first_str("SBD_METHOD"),
         "shots": env_int("SBD_SHOTS"),
         "n_shot_batches": env_int("SBD_N_SHOT_BATCHES"),
+        "saved_samples": env_first_str("SBD_SAVED_SAMPLES"),
         "sqd_options_json": env_first_str("SBD_OPTIONS_JSON"),
         "dynamical_decoupling": env_bool("SBD_DYNAMICAL_DECOUPLING"),
         "dd_sequence": env_first_str("SBD_DD_SEQUENCE"),
@@ -680,6 +692,17 @@ def main() -> None:
                                      env.get("n_shot_batches"), 1) or 1)
     if n_shot_batches > 1:
         options_value["n_shot_batches"] = n_shot_batches
+
+    # Saved sample pool(s): a per-walker list of persisted-artifact paths, read by walker_sqd when
+    # quantum_source='saved' to diagonalize offline without an IBM call. Top-level (harness-side),
+    # NOT inside params. From CLI it is a list (nargs="+"); from env/config a whitespace/comma string.
+    saved_samples = _pick_value(
+        args.saved_samples, config.get("saved_samples"), env.get("saved_samples"), None
+    )
+    if saved_samples:
+        if isinstance(saved_samples, str):
+            saved_samples = [p for p in re.split(r"[,\s]+", saved_samples.strip()) if p]
+        options_value["saved_samples"] = list(saved_samples)
 
     _set_variable(options_variable_name, options_value)
 
