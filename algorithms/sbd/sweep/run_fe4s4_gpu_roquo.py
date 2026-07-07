@@ -40,13 +40,6 @@ os.environ.setdefault("SBD_TASK_RUNNER", "concurrent")
 os.environ.setdefault("PREFECT_SERVER_DATABASE_TIMEOUT", "60")
 os.environ.setdefault("PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS", "120")
 os.environ.setdefault("OMP_NUM_THREADS", str(OMP))
-# diag-gpu is an MPI binary that HANGS run bare -> launch under mpirun. It must be ONE rank on ONE
-# GPU: the solver replicates its big tensors per rank, so multi-rank (-n 4) OOMs even across 4 GPUs.
-# A single GB200 (189GB) fits the full 3e8 (17320-det) 72q UHF solve in ~13s (verified). So -n 1.
-# Pass launcher/mpi via ENV (SBD_LAUNCHER/SBD_MPI_OPTIONS, comma-split by env_csv) since argparse
-# --mpi-options rejects '-'-prefixed tokens.
-os.environ["SBD_LAUNCHER"] = "mpirun"
-os.environ["SBD_MPI_OPTIONS"] = "-n,1"
 
 
 def _pool_paths() -> list[str]:
@@ -78,16 +71,24 @@ def main() -> None:
     os.environ["PREFECT_LOCAL_STORAGE_PATH"] = str(base / "prefect_home" / "storage")
     (base / "prefect_home" / "storage").mkdir(parents=True, exist_ok=True)
 
-    # Solver block: local target + GPU mode. --solver-mode gpu makes the executable key sbd_diag_gpu
-    # (or _uhf), which we map to the nvc++-built diag-gpu binaries. Local target runs it directly in
-    # this GB200 allocation (no nested sbatch).
+    # Solver block: SLURM target + GPU mode (the manual-blessed, stable Prefect pattern, like
+    # Fugaku/Miyabi). Each recovery-step solve becomes its own sbatch GPU job the orchestrator
+    # submits + polls (sacct) -- the orchestrator never runs diag-gpu in-process, so the ephemeral
+    # Prefect server no longer stalls (which killed the `local` target under multi-step load).
+    # The generated .slurm carries: --gres=gpu:1, --account, module load cuda/13.2 hpcx/2.50, and
+    # launches via `srun --gpu-bind=closest diag-gpu` (PMIx, per ROQUO manual sec 4.5). 1 GPU/solve
+    # (multi-rank OOMs); --ompthreads 36 = the qtr-plan cores.
     subprocess.run(
         [
             p["python"], os.path.join(p["sbd"], "create_blocks.py"),
-            "--hpc-target", "local", "--method", METHOD, "--solver-mode", "gpu",
-            "--num-nodes", "1", "--mpiprocs", "1", "--ompthreads", str(OMP),
-            # launcher + mpi options come from SBD_LAUNCHER / SBD_MPI_OPTIONS env (set above).
-            "--walltime", "06:00:00",
+            "--hpc-target", "slurm", "--method", METHOD, "--solver-mode", "gpu",
+            "--slurm-account", os.environ.get("ROQUO_ACCOUNT", "q0000219"),
+            "--slurm-partition", os.environ.get("ROQUO_PARTITION", "roquo"),
+            "--slurm-gres", "gpu:1",
+            "--launcher", "srun", "--mpi-options", "--gpu-bind=closest",
+            "--modules", "cuda/13.2", "hpcx/2.50",
+            "--num-nodes", "1", "--mpiprocs", "1", "--ompthreads", "36",
+            "--walltime", "03:00:00",
             "--carryover-ratio", "0.5", "--carryover-type", "1",
             "--solver-timeout-seconds", "43200",
             "--work-dir", str(work_dir),

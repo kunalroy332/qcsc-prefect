@@ -21,6 +21,7 @@ class SlurmJobRequest:
         qpu: Optional QPU resource selector emitted by the Slurm template.
         memory: Optional memory request passed to ``#SBATCH --mem``.
         ntasks: Optional task count passed to ``#SBATCH --ntasks``.
+        gres: Optional generic resource passed to ``#SBATCH --gres`` (e.g. ``"gpu:1"``).
     """
 
     partition: str
@@ -29,6 +30,7 @@ class SlurmJobRequest:
     qpu: str | None = None
     memory: str | None = None
     ntasks: int | None = None
+    gres: str | None = None
 
 
 def to_slurm_template_kwargs(*, exec_profile: ExecutionProfile, req: SlurmJobRequest) -> dict:
@@ -56,6 +58,8 @@ def to_slurm_template_kwargs(*, exec_profile: ExecutionProfile, req: SlurmJobReq
         kw["memory"] = req.memory
     if req.ntasks is not None:
         kw["ntasks"] = req.ntasks
+    if req.gres:
+        kw["gres"] = req.gres
     if exec_profile.mpiprocs is not None:
         kw["mpiprocs"] = exec_profile.mpiprocs
     if exec_profile.ompthreads is not None:

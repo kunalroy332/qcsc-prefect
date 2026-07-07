@@ -24,6 +24,9 @@
 {%- if qpu is defined %}
 #SBATCH --qpu={{ qpu }}
 {%- endif %}
+{%- if gres is defined %}
+#SBATCH --gres={{ gres }}
+{%- endif %}
 
 {%- if modules is defined %}
 {% for module in modules %}
