@@ -31,7 +31,7 @@ FCIDUMP = os.environ.get("REF_FCIDUMP") or os.environ.get(
     "FE2S2_FCIDUMP", "/2ndfs/ra010014/u14924_space/sweep/fe2s2_40q.fcidump"
 )
 REFS_OUT = os.environ.get("REFS_OUT", "runs/refs.json")
-DMRG_M = [int(x) for x in os.environ.get("DMRG_M", "100,200,400,800,1200").split(",")]
+DMRG_M = [int(x) for x in os.environ.get("DMRG_M", "100,200,400,800,1200").split(",") if x.strip()]
 
 refs: dict[str, float] = {}
 ctx = fcidump.read(FCIDUMP)
@@ -100,6 +100,8 @@ except Exception as exc:
 
 # --- DMRG (near-exact) -------------------------------------------------------------------------
 try:
+    if not DMRG_M:
+        raise RuntimeError("DMRG_M empty; skipping DMRG (run it as a separate job).")
     from pyblock2.driver.core import DMRGDriver, SymmetryTypes
 
     h1 = ctx["H1"]
