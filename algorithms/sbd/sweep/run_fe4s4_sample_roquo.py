@@ -14,14 +14,12 @@ import json
 import os
 import subprocess
 import time
-from pathlib import Path
 
 import fe2s2_common as C
 
 METHOD = os.environ.get("FE4S4_METHOD", "rhf")
 OMP = int(os.environ.get("ROQUO_OMPTHREADS", "140"))
 
-NODE_TMP = Path(os.environ.get("TMPDIR", f"/tmp/prefect_{os.environ.get('USER', 'u')}"))
 os.environ.setdefault("PREFECT_SERVER_ANALYTICS_ENABLED", "false")
 os.environ.setdefault("PREFECT_TELEMETRY_ENABLED", "false")
 os.environ.setdefault("SBD_TASK_RUNNER", "concurrent")
@@ -43,12 +41,14 @@ def main() -> None:
 
     base = C.run_dir(METHOD)
     (base / "samples").mkdir(parents=True, exist_ok=True)
-    prefect_home = NODE_TMP / f"ph_fe4s4_sample_{METHOD}"
+    # PREFECT_HOME MUST be on Lustre (not node-local $SLURM_SCRATCH): save_ndarray persists the pool
+    # to settings.home/storage/sqd_data (= PREFECT_HOME/storage), so a node-local PREFECT_HOME gets
+    # WIPED at job end and the 5M-shot pool is lost (exactly what happened to the first RHF sample).
+    prefect_home = base / "prefect_home"
     prefect_home.mkdir(parents=True, exist_ok=True)
     os.environ["PREFECT_HOME"] = str(prefect_home)
-    # Persist the pool on Lustre so it survives the allocation.
-    os.environ["PREFECT_LOCAL_STORAGE_PATH"] = str(base / "prefect_home" / "storage")
-    (base / "prefect_home" / "storage").mkdir(parents=True, exist_ok=True)
+    os.environ["PREFECT_LOCAL_STORAGE_PATH"] = str(prefect_home / "storage")
+    (prefect_home / "storage").mkdir(parents=True, exist_ok=True)
 
     # Idempotency: reuse an existing persisted pool.
     existing = C.find_saved_pools(METHOD)
