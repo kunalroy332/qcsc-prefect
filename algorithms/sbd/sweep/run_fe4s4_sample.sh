@@ -1,7 +1,9 @@
 #!/bin/bash
+#PJM -g "ra010014"
 #PJM -L "rscgrp=small"
 #PJM -L "node=1"
 #PJM -L "elapse=6:00:00"
+#PJM -x PJM_LLIO_GFSCACHE=/vol0004:/vol0002
 #PJM -j
 #PJM -S
 # 4Fe-4S 72q UHF sampling orchestrator on Fugaku (kobe), 5M shots -> save pool.
