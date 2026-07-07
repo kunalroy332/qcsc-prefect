@@ -67,10 +67,10 @@ def main() -> None:
     diag_gpu = os.path.join(p["diag"], "diag-gpu")
     diag_gpu_uhf = os.path.join(p["diag"], "diag-gpu_uhf")
 
-    base = C.run_dir(METHOD)          # runs/fe4s4_<method>/ (Lustre; final JSON + pool survive here)
+    base = C.run_dir(METHOD)          # runs/fe4s4_<method>/ (Lustre; final JSON + pool survive)
     (base / "recover").mkdir(parents=True, exist_ok=True)
-    # Heavy per-solve I/O (43MB fcidump + det bins each solve) + the Prefect DB go on fast local NVMe
-    # scratch ($SLURM_SCRATCH, auto-wiped at job end) per the ROQUO storage guide, NOT Lustre home.
+    # Heavy per-solve I/O (43MB fcidump + det bins) + Prefect DB go on fast local NVMe scratch
+    # ($SLURM_SCRATCH, auto-wiped at job end) per the ROQUO storage guide, NOT Lustre home.
     scratch = Path(os.environ.get("SLURM_SCRATCH", NODE_TMP))
     prefect_home = scratch / f"ph_fe4s4_gpu_{METHOD}"
     work_dir = scratch / f"work_gpu_recover_{METHOD}"
