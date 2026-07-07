@@ -30,6 +30,9 @@ SQD_DIM = int(float(os.environ.get("FE4S4_SQD_DIM", "300000000")))
 RECSTEPS = int(os.environ.get("FE4S4_RECSTEPS", "5"))
 NBATCH = int(os.environ.get("FE4S4_NBATCH", "5"))
 OMP = int(os.environ.get("ROQUO_OMPTHREADS", "140"))
+# diag-gpu is an MPI binary: it HANGS if run bare, so it must be launched under mpirun with one
+# rank per GPU (multi-GPU per solve). NGPU = GPUs in the allocation (full GB200 node = 4).
+NGPU = int(os.environ.get("FE4S4_NGPU", "4"))
 
 # Node-local Prefect DB (Lustre home is slow/locks); keep the persisted storage on Lustre.
 NODE_TMP = Path(os.environ.get("TMPDIR", f"/tmp/prefect_{os.environ.get('USER', 'u')}"))
@@ -39,6 +42,13 @@ os.environ.setdefault("SBD_TASK_RUNNER", "concurrent")
 os.environ.setdefault("PREFECT_SERVER_DATABASE_TIMEOUT", "60")
 os.environ.setdefault("PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS", "120")
 os.environ.setdefault("OMP_NUM_THREADS", str(OMP))
+# diag-gpu is an MPI binary that HANGS run bare -> launch under mpirun, one rank per GPU. Pass the
+# launcher + mpi options via ENV (SBD_LAUNCHER / SBD_MPI_OPTIONS): argparse's --mpi-options nargs=*
+# rejects tokens starting with '-' (e.g. -n, --oversubscribe), but env_first_csv splits them fine.
+# --oversubscribe: OpenMPI's Slurm slot count doesn't expose all GPUs as slots without it.
+os.environ["SBD_LAUNCHER"] = "mpirun"
+# SBD_MPI_OPTIONS is split on COMMAS by create_blocks (env_csv), so comma-separate the tokens.
+os.environ["SBD_MPI_OPTIONS"] = f"-n,{NGPU},--oversubscribe"
 
 
 def _pool_paths() -> list[str]:
@@ -72,8 +82,9 @@ def main() -> None:
         [
             p["python"], os.path.join(p["sbd"], "create_blocks.py"),
             "--hpc-target", "local", "--method", METHOD, "--solver-mode", "gpu",
-            "--num-nodes", "1", "--mpiprocs", "1", "--ompthreads", str(OMP),
-            "--launcher", "single", "--walltime", "06:00:00",
+            "--num-nodes", "1", "--mpiprocs", str(NGPU), "--ompthreads", str(OMP),
+            # launcher + mpi options come from SBD_LAUNCHER / SBD_MPI_OPTIONS env (set above).
+            "--walltime", "06:00:00",
             "--carryover-ratio", "0.5", "--carryover-type", "1",
             "--solver-timeout-seconds", "43200",
             "--work-dir", str(base / "work_gpu_recover"),
