@@ -40,6 +40,10 @@ os.environ.setdefault("SBD_TASK_RUNNER", "concurrent")
 os.environ.setdefault("PREFECT_SERVER_DATABASE_TIMEOUT", "60")
 os.environ.setdefault("PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS", "120")
 os.environ.setdefault("OMP_NUM_THREADS", str(OMP))
+# launcher + mpi options via ENV (comma-split by create_blocks' env_csv). argparse --mpi-options
+# rejects '-'-prefixed tokens like --gpu-bind=closest, so pass them here instead. srun = PMIx.
+os.environ["SBD_LAUNCHER"] = "srun"
+os.environ["SBD_MPI_OPTIONS"] = "--gpu-bind=closest"
 
 
 def _pool_paths() -> list[str]:
@@ -85,7 +89,7 @@ def main() -> None:
             "--slurm-account", os.environ.get("ROQUO_ACCOUNT", "q0000219"),
             "--slurm-partition", os.environ.get("ROQUO_PARTITION", "roquo"),
             "--slurm-gres", "gpu:1",
-            "--launcher", "srun", "--mpi-options", "--gpu-bind=closest",
+            # launcher=srun + mpi-options come from SBD_LAUNCHER/SBD_MPI_OPTIONS env (set above).
             "--modules", "cuda/13.2", "hpcx/2.50",
             "--num-nodes", "1", "--mpiprocs", "1", "--ompthreads", "36",
             "--walltime", "03:00:00",
