@@ -86,8 +86,12 @@ except Exception as exc:
     print(f"[skip] SCF/CC block: {exc}", flush=True)
 
 # --- HCI (heat-bath selected CI) ---------------------------------------------------------------
-# Optional: only if a selected-CI solver is importable. Kept behind try so refs still write.
+# Optional. Selected-CI is intractable for large active spaces (e.g. 4Fe-4S 36o/54e HANGS for
+# hours), so skip above HCI_MAX_NORB (default 24) unless HCI_MAX_NORB is raised explicitly.
 try:
+    hci_max = int(os.environ.get("HCI_MAX_NORB", "24"))
+    if norb > hci_max:
+        raise RuntimeError(f"norb={norb} > HCI_MAX_NORB={hci_max}; skipping HCI (intractable).")
     from pyscf import fci
 
     eri8 = ao2mo.restore(8, ctx["H2"], norb)
