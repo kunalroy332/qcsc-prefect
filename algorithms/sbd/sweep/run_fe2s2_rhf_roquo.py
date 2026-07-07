@@ -63,13 +63,15 @@ def main() -> None:
     #    (shots, error mitigation, carryover) match the Fugaku FE_sample run exactly.
     import subprocess
 
+    # hpc-target "local": run the diag binary directly as a subprocess INSIDE this Slurm allocation
+    # (no per-solve sbatch round-trip). The queued "slurm" target works too but adds ~2 min queue
+    # latency per solve -- fatal for a 5x5 recovery x batch loop. The allocation itself is obtained
+    # by run_fe2s2_rhf_roquo.sh (sbatch/srun); create_blocks just needs the executable + threads.
     cmd = [
         str(sbd / ".venv/bin/python"), str(sbd / "create_blocks.py"),
-        "--hpc-target", "slurm",
+        "--hpc-target", "local",
         "--method", METHOD,
         "--solver-mode", "cpu",
-        "--slurm-account", ACCOUNT,
-        "--slurm-partition", PARTITION,
         "--num-nodes", "1",
         "--mpiprocs", "1",              # single diag process...
         "--ompthreads", str(OMP_THREADS),  # ...with OMP_THREADS threads
