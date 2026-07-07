@@ -53,11 +53,27 @@ try:
 
     mf = fcidump.to_scf(FCIDUMP)
     mf = mf.to_uhf()
+    mf.max_cycle = int(os.environ.get("SCF_MAX_CYCLE", "300"))
+    mf.conv_tol = 1e-9
     mf.kernel()
+    if not mf.converged:
+        print("[warn] UHF SCF not converged; retrying with DIIS damping + level shift", flush=True)
+        mf.diis_space = 12
+        mf.level_shift = 0.2
+        mf.kernel()
     _record("UHF", mf.e_tot)
 
+    # Strongly-correlated Fe-S CCSD needs many iterations; default 50 does not converge. Bump
+    # max_cycle and DIIS space (override via CCSD_MAX_CYCLE). Report convergence honestly.
     mycc = cc.UCCSD(mf)
+    mycc.max_cycle = int(os.environ.get("CCSD_MAX_CYCLE", "300"))
+    mycc.diis_space = int(os.environ.get("CCSD_DIIS_SPACE", "12"))
+    mycc.conv_tol = 1e-7
+    mycc.conv_tol_normt = 1e-5
     mycc.kernel()
+    if not mycc.converged:
+        print(f"[warn] UCCSD NOT converged after {mycc.max_cycle} cycles "
+              f"(E_corr={mycc.e_corr:.8f}); recording anyway.", flush=True)
     _record("UCCSD", mycc.e_tot())
     try:
         et = mycc.ccsd_t()
