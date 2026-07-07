@@ -35,6 +35,15 @@ GRID = "#e1e0d9"
 SERIES = {"uhf": "#2a78d6", "rhf": "#eb6834"}  # slot 1 (blue), slot 8 (orange)
 LABEL = {"uhf": "UHF", "rhf": "RHF"}
 MARKER = {"uhf": "o", "rhf": "s"}
+# Pretty molecule titles (matplotlib mathtext). Falls back to the raw id if unknown.
+MOL_TITLE = {
+    "fe2s2": "Fe$_2$S$_2$ (30e, 20o)",
+    "fe4s4": "Fe$_4$S$_4$ (54e, 36o)",
+}
+
+
+def _mol_title() -> str:
+    return MOL_TITLE.get(C.MOLECULE, C.MOLECULE)
 # Reference flat lines: distinct dashes + direct labels (never color-alone).
 REF_STYLE = {
     "DMRG": dict(color="#0b0b0b", ls="-", lw=1.6),      # near-exact = solid dark
@@ -121,7 +130,7 @@ def plot_energy(traces, refs, out_dir: Path) -> None:
 
     ax.set_xlabel("Configuration-recovery iteration")
     ax.set_ylabel("Energy  (Ha)")
-    ax.set_title("Fe$_2$S$_2$ (30e, 20o): SQD energy vs recovery iteration",
+    ax.set_title(f"{_mol_title()}: SQD energy vs recovery iteration",
                  color=INK, fontsize=12, pad=12)
     ax.legend(frameon=False, loc="upper right", fontsize=9)
     fig.tight_layout()
@@ -175,7 +184,7 @@ def plot_panels(traces, refs, out_dir: Path) -> None:
     ax_spin.set_xlabel("recovery iteration")
     ax_spin.legend(frameon=False, fontsize=8, loc="upper right")
 
-    fig.suptitle("Fe$_2$S$_2$ RHF vs UHF — multi-iteration recovery diagnostics",
+    fig.suptitle(f"{_mol_title()} RHF vs UHF — multi-iteration recovery diagnostics",
                  color=INK, fontsize=13, y=0.99)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     for ext in ("png", "svg"):

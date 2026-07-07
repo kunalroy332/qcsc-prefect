@@ -24,7 +24,10 @@ import numpy as np
 from pyscf import ao2mo
 from pyscf.tools import fcidump
 
-FCIDUMP = os.environ.get(
+# Molecule-agnostic: point REF_FCIDUMP at any FCIDUMP; norb/nelec/ms2 are read from its header.
+# REFS_OUT is where the JSON of reference energies is written. DMRG_M is the bond-dimension ramp.
+# (FE2S2_FCIDUMP kept as a fallback for older Fe2S2 launchers.)
+FCIDUMP = os.environ.get("REF_FCIDUMP") or os.environ.get(
     "FE2S2_FCIDUMP", "/2ndfs/ra010014/u14924_space/sweep/fe2s2_40q.fcidump"
 )
 REFS_OUT = os.environ.get("REFS_OUT", "runs/refs.json")
@@ -36,7 +39,7 @@ norb = int(ctx["NORB"])
 nelec = int(ctx["NELEC"])
 ms2 = int(ctx["MS2"])
 ecore = float(ctx["ECORE"])
-print(f"Fe2S2: norb={norb} nelec={nelec} ms2={ms2} ecore={ecore:.6f}", flush=True)
+print(f"refs: norb={norb} nelec={nelec} ms2={ms2} ecore={ecore:.6f} src={FCIDUMP}", flush=True)
 
 
 def _record(name: str, energy: float) -> None:
