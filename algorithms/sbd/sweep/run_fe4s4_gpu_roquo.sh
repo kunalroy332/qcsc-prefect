@@ -2,11 +2,11 @@
 #SBATCH --job-name=fe4s4-gpu
 #SBATCH --account=q0000219
 #SBATCH --partition=roquo
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:1
 #SBATCH --time=03:00:00
 #SBATCH --output=%x.%j.out
 #SBATCH --error=%x.%j.err
-# 4Fe-4S 72q GPU recovery on ROQUO GB200 (full node = 4 GPUs). RHF by default.
+# 4Fe-4S 72q GPU recovery on ROQUO GB200 (1 GPU; solver OOMs multi-rank). RHF by default.
 # Runs the nvc++-built diag-gpu directly in this allocation (local target, no nested sbatch).
 #   METHOD=rhf FE4S4_POOL=<npz> sbatch run_fe4s4_gpu_roquo.sh
 #   Interactive: srun --account=q0000219 --partition=roquo --gres=gpu:4 --time=03:00:00 \
