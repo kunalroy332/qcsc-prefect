@@ -39,6 +39,8 @@ fi
 
 export FE2S2_QSRC="${FE2S2_QSRC:-real-device}"
 export ROQUO_OMPTHREADS="${ROQUO_OMPTHREADS:-140}"
+# FCIDUMP lives here on ROQUO (transferred from Fugaku); override the Fugaku-path default.
+export FE2S2_FCIDUMP="${FE2S2_FCIDUMP:-$SWEEP/fe2s2_40q.fcidump}"
 
 cd "$SBD"
 "$SBD/.venv/bin/python" "$SWEEP/run_fe2s2_rhf_roquo.py"
