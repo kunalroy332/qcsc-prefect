@@ -147,7 +147,9 @@ def plot_panels(traces, refs, out_dir: Path) -> None:
     for ax in axes.flat:
         _style_axes(ax)
 
-    dmrg = refs.get("DMRG")
+    # Error panel reference: prefer DMRG (near-exact), else the tightest available classical anchor.
+    err_ref_name = next((n for n in ("DMRG", "CCSD(T)", "UCCSD") if n in refs), None)
+    err_ref = refs.get(err_ref_name) if err_ref_name else None
 
     for method, trace in traces.items():
         xs = _iters(trace)
@@ -155,8 +157,8 @@ def plot_panels(traces, refs, out_dir: Path) -> None:
         common = dict(marker=mk, ms=5, lw=2, color=col, label=lab,
                       markeredgecolor=SURFACE, markeredgewidth=1, zorder=5)
         ax_e.plot(xs, [t["energy"] for t in trace], **common)
-        if dmrg is not None:
-            ax_de.plot(xs, [(t["energy"] - dmrg) * 1000 for t in trace], **common)
+        if err_ref is not None:
+            ax_de.plot(xs, [(t["energy"] - err_ref) * 1000 for t in trace], **common)
         ax_dim.plot(xs, [t["net_dim"] for t in trace], **common)
         ax_spin.plot(xs, [t["sum_2Sz"] for t in trace], **common)
 
@@ -169,10 +171,11 @@ def plot_panels(traces, refs, out_dir: Path) -> None:
     ax_e.legend(frameon=False, fontsize=8, loc="upper right")
 
     ax_de.axhline(0, color=INK, lw=1.0, zorder=2)
-    ax_de.annotate("DMRG", (0.98, 0), xycoords=("axes fraction", "data"),
-                   xytext=(0, 3), textcoords="offset points", fontsize=8,
-                   color=INK, ha="right", fontfamily="monospace")
-    ax_de.set_title("Error vs DMRG (mHa)", color=INK, fontsize=11)
+    if err_ref_name:
+        ax_de.annotate(err_ref_name, (0.98, 0), xycoords=("axes fraction", "data"),
+                       xytext=(0, 3), textcoords="offset points", fontsize=8,
+                       color=INK, ha="right", fontfamily="monospace")
+    ax_de.set_title(f"Error vs {err_ref_name or 'ref'} (mHa)", color=INK, fontsize=11)
     ax_de.set_xlabel("recovery iteration")
 
     ax_dim.set_title("Net subspace dimension", color=INK, fontsize=11)
