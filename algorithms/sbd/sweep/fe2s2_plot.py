@@ -135,7 +135,7 @@ def plot_energy(traces, refs, out_dir: Path) -> None:
     ax.legend(frameon=False, loc="upper right", fontsize=9)
     fig.tight_layout()
     for ext in ("png", "svg"):
-        fig.savefig(out_dir / f"fe2s2_energy_vs_iter.{ext}", facecolor=SURFACE,
+        fig.savefig(out_dir / f"{C.MOLECULE}_energy_vs_iter.{ext}", facecolor=SURFACE,
                     bbox_inches="tight")
     plt.close(fig)
 
@@ -188,7 +188,7 @@ def plot_panels(traces, refs, out_dir: Path) -> None:
                  color=INK, fontsize=13, y=0.99)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     for ext in ("png", "svg"):
-        fig.savefig(out_dir / f"fe2s2_panels.{ext}", facecolor=SURFACE, bbox_inches="tight")
+        fig.savefig(out_dir / f"{C.MOLECULE}_panels.{ext}", facecolor=SURFACE, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -221,7 +221,7 @@ def main() -> None:
     # Mirror into each method's own post/ for convenience.
     for method in traces:
         pdir = C.run_subdirs(method)["post"]
-        for f in ("fe2s2_energy_vs_iter.png", "fe2s2_panels.png", "energies.csv"):
+        for f in (f"{C.MOLECULE}_energy_vs_iter.png", f"{C.MOLECULE}_panels.png", "energies.csv"):
             src = out_dir / f
             if src.exists():
                 (pdir / f).write_bytes(src.read_bytes())
