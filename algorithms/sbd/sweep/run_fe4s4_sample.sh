@@ -1,16 +1,11 @@
 #!/bin/bash
-#PJM -g "ra010014"
-#PJM -L "rscgrp=small"
-#PJM -L "node=1"
-#PJM -L "elapse=6:00:00"
-#PJM -x PJM_LLIO_GFSCACHE=/vol0004:/vol0002
-#PJM -j
-#PJM -S
-# 4Fe-4S 72q UHF sampling orchestrator on Fugaku (kobe), 5M shots -> save pool.
-# This PJM job runs the Prefect orchestrator (1 node); it submits the SBD solver as its own
-# large-node PJM job (FE4S4_NODES, default 100 = 10x10 grid, queue "large").
-#   Real:    pjsub run_fe4s4_sample.sh
-#   Dry-run: FE2S2_QSRC=random pjsub run_fe4s4_sample.sh
+#SBATCH --output=/vol0206/data/ra010014/u14924/u14924_space/sweep/run_fe4s4_sample.%j.log
+#SBATCH --error=/vol0206/data/ra010014/u14924/u14924_space/sweep/run_fe4s4_sample.%j.err
+# 4Fe-4S 72q UHF sampling ORCHESTRATOR on Fugaku. Runs on the mem2 pre/post partition (x86_64,
+# matches the venv python arch); it submits the SBD solver as its own large-node PJM job
+# (FE4S4_NODES, default 3600 = 60x60 grid, queue "large") for a fast turnaround.
+#   Real:    sbatch --partition=mem2 --time=360 run_fe4s4_sample.sh
+#   Dry-run: FE2S2_QSRC=random sbatch --partition=mem2 --time=120 run_fe4s4_sample.sh
 # ONE Fugaku job at a time (this orchestrator + its child solver job).
 source ~/load_env.sh
 export UV_PYTHON_INSTALL_DIR="$MY_SPACE/uv_python"
@@ -41,4 +36,6 @@ rm -rf "$PREFECT_HOME"; mkdir -p "$PREFECT_HOME"
 
 "$MY_PROJECT/algorithms/sbd/.venv/bin/python" \
     "$MY_PROJECT/algorithms/sbd/sweep/run_fe4s4_sample.py"
-echo "EXIT_fe4s4_sample=$?"
+rc=$?
+echo "EXIT_fe4s4_sample=$rc"
+exit $rc
