@@ -56,7 +56,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--config", type=Path, help="Path to TOML/JSON config file.")
 
-    parser.add_argument("--hpc-target", choices=["miyabi", "fugaku", "slurm"])
+    parser.add_argument("--hpc-target", choices=["miyabi", "fugaku", "slurm", "local"])
     parser.add_argument("--project")
     parser.add_argument("--group")
     parser.add_argument("--queue")
@@ -218,6 +218,13 @@ def _default_block_names(*, hpc_target: str, solver_mode: str) -> dict[str, str]
             "hpc_profile_block_name": "hpc-slurm-sbd-gpu" if is_gpu else "hpc-slurm-sbd",
             "solver_block_name": "davidson-solver-gpu" if is_gpu else "davidson-solver",
         }
+    if hpc_target == "local":
+        return {
+            "profile_name": "sbd-gpu" if is_gpu else "sbd-mpi",
+            "execution_profile_block_name": "exec-sbd-local-gpu" if is_gpu else "exec-sbd-local",
+            "hpc_profile_block_name": "hpc-local-sbd-gpu" if is_gpu else "hpc-local-sbd",
+            "solver_block_name": "davidson-solver-gpu" if is_gpu else "davidson-solver",
+        }
     return {
         "profile_name": "sbd-gpu" if is_gpu else "sbd-mpi",
         "execution_profile_block_name": "exec-sbd-fugaku-gpu" if is_gpu else "exec-sbd-fugaku",
@@ -352,12 +359,17 @@ def main() -> None:
         .strip()
         .lower()
     )
-    if hpc_target not in {"miyabi", "fugaku", "slurm"}:
-        raise RuntimeError("'hpc_target' must be 'miyabi', 'fugaku', or 'slurm'.")
+    if hpc_target not in {"miyabi", "fugaku", "slurm", "local"}:
+        raise RuntimeError("'hpc_target' must be 'miyabi', 'fugaku', 'slurm', or 'local'.")
     is_miyabi = hpc_target == "miyabi"
     is_slurm = hpc_target == "slurm"
+    is_local = hpc_target == "local"
 
-    if is_slurm:
+    if is_local:
+        # Local target runs the diag binary directly as a subprocess (no scheduler): no account,
+        # partition, or queue needed. Used for in-allocation ROQUO runs and laptops.
+        project = ""
+    elif is_slurm:
         # For Slurm the "project" carries the Slurm --account (--slurm-account wins over --project).
         project = _pick_value(
             args.slurm_account,
@@ -392,7 +404,7 @@ def main() -> None:
             config.get("project"),
             env.get("project"),
         )
-    if not project:
+    if not project and not is_local:
         if is_miyabi:
             raise RuntimeError(
                 "Set 'project' in --config/--project or SBD_PROJECT/MIYABI_PBS_PROJECT."
@@ -402,8 +414,11 @@ def main() -> None:
             "or use SBD_GROUP/FUGAKU_GROUP/FUGAKU_PROJECT."
         )
 
+    # Local target needs no queue/partition.
+    if is_local:
+        queue = ""
     # For Slurm the "queue" carries the partition (--slurm-partition wins over --queue).
-    if is_slurm:
+    elif is_slurm:
         queue = _pick_value(
             args.slurm_partition,
             config.get("slurm_partition"),
@@ -441,8 +456,9 @@ def main() -> None:
 
     if is_miyabi:
         launcher_default = "mpiexec.hydra"
-    elif is_slurm:
-        # Run the diag binary directly inside the Slurm allocation (single node); no MPI launcher.
+    elif is_slurm or is_local:
+        # Run the diag binary directly (no MPI launcher): in-allocation for slurm, subprocess
+        # for local.
         launcher_default = "single"
     else:
         launcher_default = "mpiexec"
@@ -669,7 +685,16 @@ def main() -> None:
     if sbd_executable_uhf:
         executable_map[uhf_key] = str(Path(str(sbd_executable_uhf)).expanduser().resolve())
 
-    if is_slurm:
+    if is_local:
+        HPCProfileBlock(
+            hpc_target="local",
+            queue_cpu="",
+            queue_gpu="",
+            project_cpu="",
+            project_gpu="",
+            executable_map=executable_map,
+        ).save(hpc_profile_block_name, overwrite=True)
+    elif is_slurm:
         slurm_qpu = _pick_value(args.slurm_qpu, config.get("slurm_qpu"), env.get("slurm_qpu"))
         slurm_memory = _pick_value(
             args.slurm_memory, config.get("slurm_memory"), env.get("slurm_memory")
