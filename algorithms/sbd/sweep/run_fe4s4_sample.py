@@ -24,8 +24,9 @@ METHOD = os.environ.get("FE4S4_METHOD", "rhf")  # RHF case (compare like Fe2S2)
 
 
 def main() -> None:
-    assert C.MOLECULE == "fe4s4", f"set FE_MOL=fe4s4 (got {C.MOLECULE})"
-    dirs = C.run_subdirs(METHOD)
+    if C.MOLECULE != "fe4s4":
+        raise SystemExit(f"set FE_MOL=fe4s4 (got {C.MOLECULE})")
+    C.run_subdirs(METHOD)  # ensure samples/recover/post exist
     qsrc = os.environ.get("FE2S2_QSRC", "real-device")
     p = C.sbd_paths()
 
@@ -33,7 +34,7 @@ def main() -> None:
     existing = C.find_saved_pools(METHOD)
     if existing and os.environ.get("FE4S4_FORCE") != "1":
         C.samples_manifest_path(METHOD).write_text(json.dumps(existing, indent=2))
-        print(f"[skip] {METHOD}: {len(existing)} pool(s) already present; reuse (FE4S4_FORCE=1 to redo).")
+        print(f"[skip] {METHOD}: {len(existing)} pool(s) present; reuse (FE4S4_FORCE=1 to redo).")
         for x in existing:
             print(f"  {x}")
         return
@@ -93,7 +94,8 @@ def main() -> None:
     pools = C.find_saved_pools(METHOD)
     C.samples_manifest_path(METHOD).write_text(json.dumps(pools, indent=2))
     print(
-        f"CAPTURE_FE4S4_SAMPLE {METHOD}: E_sampling={e:.6f} qsrc={qsrc} pools={len(pools)} ({dt:.0f}s)",
+        f"CAPTURE_FE4S4_SAMPLE {METHOD}: E_sampling={e:.6f} qsrc={qsrc} "
+        f"pools={len(pools)} ({dt:.0f}s)",
         flush=True,
     )
     for x in pools:
