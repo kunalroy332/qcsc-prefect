@@ -144,6 +144,13 @@ ENV/
 env.bak/
 venv.bak/
 
+# SQD sweep run artifacts + local secrets (never commit credentials or run data)
+algorithms/sbd/sweep/.env.local
+algorithms/sbd/sweep/runs/
+algorithms/sbd/sweep/work_*/
+algorithms/sbd/sweep/ph_*/
+algorithms/sbd/sweep/prefect_home/
+
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -215,3 +222,6 @@ algorithms/sbd/native/*.o
 algorithms/sbd/native/sbd/
 .DS_Store
 .vscode/sftp.json
+
+# Local analysis artifacts (not for commit)
+docs/analysis_2026-06-30/

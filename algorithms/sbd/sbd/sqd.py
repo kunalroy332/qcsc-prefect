@@ -473,6 +473,12 @@ def walker_sqd(
     best_num_post = 0
     best_net_dim = 0
 
+    # Per-recovery-step trajectory for offline analysis / presentation plots. telemetry otherwise
+    # keeps only the single best pass, so the per-iteration curve (energy, subspace dim, spin
+    # density, useful-det fraction, occupancies) would be unrecoverable except by log-scraping.
+    # Purely diagnostic; appended once per pass and never read back inside the loop.
+    recovery_trace: list[dict] = []
+
     # One-time diagnostics on the raw quantum samples (before any recovery).
     logger.info(
         "[diag] raw samples: %d bitstrings, %d unique (norb=%d, nelec=(%d,%d))",
@@ -703,6 +709,27 @@ def walker_sqd(
             best_num_post = len(bitstrings_post)
             best_net_dim = net_dim
 
+        # Record this pass's trajectory point. net_dim / sqd_dim is the "useful determinant
+        # fraction": how much of the requested subspace actually survived recovery + post-selection
+        # into the diagonalized CI matrix (a subspace-quality proxy, see qcsc-bigdim memory). All
+        # quantities are already computed above; this is a cheap dict append.
+        _be = np.asarray(batch_energies, dtype=np.float64) if batch_energies else np.empty(0)
+        recovery_trace.append(
+            {
+                "step": int(recovery_step),
+                "energy": float(energy),
+                "net_dim": int(net_dim),
+                "n_post": int(len(bitstrings_post)),
+                "sum_2Sz": float(spin_density.sum()),
+                "useful_frac": float(net_dim / sqd_dim) if sqd_dim else 0.0,
+                "batch_min": float(_be.min()) if _be.size else float(energy),
+                "batch_mean": float(_be.mean()) if _be.size else float(energy),
+                "batch_std": float(_be.std()) if _be.size else 0.0,
+                "occ_a": step_occ_a.tolist(),
+                "occ_b": step_occ_b.tolist(),
+            }
+        )
+
         # Feed the batch-averaged occupancies into the next recovery pass (self-consistency).
         avg_occ = (step_occ_a, step_occ_b)
 
@@ -735,6 +762,7 @@ def walker_sqd(
         n_recovery_steps=n_recovery_steps,
         n_batches=n_batches,
         sqd_data=str(best_report_s3),
+        recovery_trace=recovery_trace,
         last_updated=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     )
 
