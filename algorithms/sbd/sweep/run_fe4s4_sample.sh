@@ -18,9 +18,9 @@ export PATH="$MY_PROJECT/algorithms/sbd/.venv/bin:$PATH"
 export FE_MOL="fe4s4"
 export FE4S4_FCIDUMP="$MY_SPACE/sweep/fcidump_Fe4S4_MO.txt"
 export FE4S4_METHOD="${FE4S4_METHOD:-uhf}"
-export FE4S4_NODES="${FE4S4_NODES:-100}"
-export FE4S4_ADET="${FE4S4_ADET:-10}"
-export FE4S4_BDET="${FE4S4_BDET:-10}"
+export FE4S4_NODES="${FE4S4_NODES:-3600}"
+export FE4S4_ADET="${FE4S4_ADET:-60}"
+export FE4S4_BDET="${FE4S4_BDET:-60}"
 export FE4S4_QUEUE="${FE4S4_QUEUE:-large}"
 
 # IBM credentials (kobe) from the gitignored sweep/.env.local (never committed).
