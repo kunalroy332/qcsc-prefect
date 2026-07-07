@@ -74,10 +74,12 @@ try:
     if not mycc.converged:
         print(f"[warn] UCCSD NOT converged after {mycc.max_cycle} cycles "
               f"(E_corr={mycc.e_corr:.8f}); recording anyway.", flush=True)
-    _record("UCCSD", mycc.e_tot())
+    # pyscf: cc.e_tot is a float attribute, NOT callable (mycc.e_tot() raises
+    # "'numpy.float64' object is not callable").
+    _record("UCCSD", float(mycc.e_tot))
     try:
         et = mycc.ccsd_t()
-        _record("CCSD(T)", mycc.e_tot() + et)
+        _record("CCSD(T)", float(mycc.e_tot) + float(et))
     except Exception as exc:
         print(f"[skip] CCSD(T): {exc}", flush=True)
 except Exception as exc:
