@@ -21,7 +21,6 @@ import json
 import os
 import subprocess
 import time
-from pathlib import Path
 
 import fe2s2_common as C
 
@@ -70,7 +69,7 @@ def main() -> None:
     (base / "recover").mkdir(parents=True, exist_ok=True)
     # Keep work_dir + PREFECT_HOME on Lustre (base): verified working (job 2309). The diag-gpu
     # solve FAILS when work_dir is on $SLURM_SCRATCH (local NVMe) — likely the per-node scratch is
-    # not where the solver/mpirun expects. Lustre is slower but correct, which wins for the deadline.
+    # not where the solver/mpirun expects. Lustre is slower but correct.
     prefect_home = base / "prefect_home_gpu"
     work_dir = base / "work_gpu_recover"
     prefect_home.mkdir(parents=True, exist_ok=True)
