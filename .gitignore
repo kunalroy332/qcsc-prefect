@@ -144,15 +144,10 @@ ENV/
 env.bak/
 venv.bak/
 
-# SQD sweep run artifacts + local secrets (never commit credentials or run data)
-algorithms/sbd/sweep/.env.local
-algorithms/sbd/sweep/runs/
-algorithms/sbd/sweep/work_*/
-algorithms/sbd/sweep/ph_*/
-algorithms/sbd/sweep/prefect_home/
-# FCIDUMP integral files are data, not code (some are 10s of MB) -- never commit.
-algorithms/sbd/sweep/*.fcidump
-algorithms/sbd/sweep/fcidump_*.txt
+# SQD sweep/ is experiment scratch: run scripts, launchers, run data, figures, secrets, and
+# per-cluster outputs. It is NOT committed (synced to HPC via scp, not git). Final presentation
+# figures live in docs/<date>/ instead. Ignore the whole directory.
+algorithms/sbd/sweep/
 
 # Spyder project settings
 .spyderproject
