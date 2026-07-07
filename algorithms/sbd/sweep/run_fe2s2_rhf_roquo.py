@@ -57,6 +57,13 @@ def main() -> None:
     storage.mkdir(parents=True, exist_ok=True)
     os.environ["PREFECT_LOCAL_STORAGE_PATH"] = str(storage)
     os.environ.setdefault("PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS", "120")
+    # The Ray task runner + a single SQLite DB deadlocks ("database is locked") when the recovery/
+    # batch tasks write concurrently. This run is single-walker, so parallelism buys nothing: use
+    # the lightweight ConcurrentTaskRunner and give SQLite a long busy-timeout so any contended
+    # write waits instead of erroring.
+    os.environ.setdefault("SBD_TASK_RUNNER", "concurrent")
+    os.environ.setdefault("PREFECT_SERVER_DATABASE_TIMEOUT", "60")
+    os.environ.setdefault("PREFECT_SERVER_DATABASE_CONNECTION_TIMEOUT", "60")
     os.environ.setdefault("OMP_NUM_THREADS", str(OMP_THREADS))
 
     # 1. Solver block on the Slurm target. --method rhf selects the RHF `diag` binary. Conditions
