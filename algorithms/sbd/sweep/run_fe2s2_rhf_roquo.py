@@ -45,10 +45,18 @@ def main() -> None:
     diag = sbd / "native" / "diag"
     diag_uhf = sbd / "native" / "diag_uhf"
 
-    # Isolated Prefect home under the run dir; node-local cache/tmp (Lustre rmtree fix, see memory).
-    os.environ["PREFECT_HOME"] = str(C.prefect_home(METHOD))
-    os.environ["PREFECT_LOCAL_STORAGE_PATH"] = str(C.prefect_home(METHOD) / "storage")
-    C.prefect_home(METHOD).mkdir(parents=True, exist_ok=True)
+    # Prefect's ephemeral API + SQLite DB must live on FAST node-local storage: on Lustre home the
+    # ephemeral server times out ("Timed out while attempting to connect to ephemeral Prefect API").
+    # Put PREFECT_HOME on /tmp; keep the persisted sample pool (LOCAL_STORAGE_PATH) under the run
+    # dir on Lustre so pools survive after the allocation. Bump the ephemeral startup timeout too.
+    node_tmp = Path(os.environ.get("TMPDIR", f"/tmp/prefect_{os.environ.get('USER', 'u')}"))
+    prefect_home = node_tmp / f"ph_{C.MOLECULE}_{METHOD}"
+    prefect_home.mkdir(parents=True, exist_ok=True)
+    os.environ["PREFECT_HOME"] = str(prefect_home)
+    storage = C.prefect_home(METHOD) / "storage"
+    storage.mkdir(parents=True, exist_ok=True)
+    os.environ["PREFECT_LOCAL_STORAGE_PATH"] = str(storage)
+    os.environ.setdefault("PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS", "120")
     os.environ.setdefault("OMP_NUM_THREADS", str(OMP_THREADS))
 
     # 1. Solver block on the Slurm target. --method rhf selects the RHF `diag` binary. Conditions
