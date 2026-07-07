@@ -23,9 +23,9 @@ TAG = "fe4s4_sample"
 METHOD = os.environ.get("FE4S4_METHOD", "uhf")  # UHF (open-shell) case
 # Large-node solver profile: square comm grid (adet x bdet x task). 100 = 10x10x1. Override with
 # FE4S4_NODES + FE4S4_ADET/FE4S4_BDET (must satisfy adet*bdet*task == nodes, a perfect square grid).
-NODES = int(os.environ.get("FE4S4_NODES", "100"))
-ADET = int(os.environ.get("FE4S4_ADET", "10"))
-BDET = int(os.environ.get("FE4S4_BDET", "10"))
+NODES = int(os.environ.get("FE4S4_NODES", "3600"))
+ADET = int(os.environ.get("FE4S4_ADET", "60"))
+BDET = int(os.environ.get("FE4S4_BDET", "60"))
 QUEUE = os.environ.get("FE4S4_QUEUE", "large")
 
 # Prefect's own usage telemetry contends on the ephemeral SQLite DB ("database is locked" on the
