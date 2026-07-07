@@ -35,7 +35,6 @@ NBATCH = int(os.environ.get("FE4S4_NBATCH", "1"))
 OMP = int(os.environ.get("ROQUO_OMPTHREADS", "140"))
 
 # Node-local Prefect DB (Lustre home is slow/locks); keep the persisted storage on Lustre.
-NODE_TMP = Path(os.environ.get("TMPDIR", f"/tmp/prefect_{os.environ.get('USER', 'u')}"))
 os.environ.setdefault("PREFECT_SERVER_ANALYTICS_ENABLED", "false")
 os.environ.setdefault("PREFECT_TELEMETRY_ENABLED", "false")
 os.environ.setdefault("SBD_TASK_RUNNER", "concurrent")
@@ -67,13 +66,13 @@ def main() -> None:
     diag_gpu = os.path.join(p["diag"], "diag-gpu")
     diag_gpu_uhf = os.path.join(p["diag"], "diag-gpu_uhf")
 
-    base = C.run_dir(METHOD)          # runs/fe4s4_<method>/ (Lustre; final JSON + pool survive)
+    base = C.run_dir(METHOD)          # runs/fe4s4_<method>/ (Lustre)
     (base / "recover").mkdir(parents=True, exist_ok=True)
-    # Heavy per-solve I/O (43MB fcidump + det bins) + Prefect DB go on fast local NVMe scratch
-    # ($SLURM_SCRATCH, auto-wiped at job end) per the ROQUO storage guide, NOT Lustre home.
-    scratch = Path(os.environ.get("SLURM_SCRATCH", NODE_TMP))
-    prefect_home = scratch / f"ph_fe4s4_gpu_{METHOD}"
-    work_dir = scratch / f"work_gpu_recover_{METHOD}"
+    # Keep work_dir + PREFECT_HOME on Lustre (base): verified working (job 2309). The diag-gpu
+    # solve FAILS when work_dir is on $SLURM_SCRATCH (local NVMe) — likely the per-node scratch is
+    # not where the solver/mpirun expects. Lustre is slower but correct, which wins for the deadline.
+    prefect_home = base / "prefect_home_gpu"
+    work_dir = base / "work_gpu_recover"
     prefect_home.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
     os.environ["PREFECT_HOME"] = str(prefect_home)
