@@ -67,6 +67,7 @@ class HPCProfileBlock(Block):
     slurm_qpu: str | None = Field(default=None, title="Slurm: QPU")
     slurm_memory: str | None = Field(default=None, title="Slurm: Memory")
     slurm_ntasks: int | None = Field(default=None, gt=0, title="Slurm: Tasks")
+    slurm_gres: str | None = Field(default=None, title="Slurm: Generic Resource (--gres)")
 
     # Fugaku-specific options (ignored for other systems)
     gfscache: str | None = Field(default=None, title="Fugaku: GFS Cache Path (PJM_LLIO_GFSCACHE)")

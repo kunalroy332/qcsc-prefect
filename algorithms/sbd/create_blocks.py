@@ -87,6 +87,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--slurm-qpu")
     parser.add_argument("--slurm-memory")
     parser.add_argument("--slurm-ntasks", type=int)
+    parser.add_argument("--slurm-gres", help="Slurm --gres, e.g. gpu:1 (ROQUO GPU jobs).")
 
     parser.add_argument("--script-filename")
     parser.add_argument("--metrics-artifact-key")
@@ -311,6 +312,7 @@ def _env_values() -> dict[str, Any]:
         "slurm_qpu": env_first_str("SBD_SLURM_QPU"),
         "slurm_memory": env_first_str("SBD_SLURM_MEMORY"),
         "slurm_ntasks": env_int("SBD_SLURM_NTASKS"),
+        "slurm_gres": env_first_str("SBD_SLURM_GRES"),
         "script_filename": env_first_str("SBD_SCRIPT_FILENAME"),
         "metrics_artifact_key": env_first_str("SBD_METRICS_ARTIFACT_KEY"),
         "command_block_name": env_first_str("SBD_CMD_BLOCK_NAME"),
@@ -702,6 +704,7 @@ def main() -> None:
         slurm_ntasks = _pick_value(
             args.slurm_ntasks, config.get("slurm_ntasks"), env.get("slurm_ntasks")
         )
+        slurm_gres = _pick_value(args.slurm_gres, config.get("slurm_gres"), env.get("slurm_gres"))
         HPCProfileBlock(
             hpc_target="slurm",
             queue_cpu=str(queue),      # partition
@@ -712,6 +715,7 @@ def main() -> None:
             slurm_qpu=str(slurm_qpu) if slurm_qpu else None,
             slurm_memory=str(slurm_memory) if slurm_memory else None,
             slurm_ntasks=int(slurm_ntasks) if slurm_ntasks else None,
+            slurm_gres=str(slurm_gres) if slurm_gres else None,
         ).save(hpc_profile_block_name, overwrite=True)
     elif is_miyabi:
         HPCProfileBlock(
