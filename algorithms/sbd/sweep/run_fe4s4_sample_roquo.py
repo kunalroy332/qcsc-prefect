@@ -4,7 +4,7 @@ ROQUO compute nodes reach IBM Quantum, so we can sample here without touching Fu
 The sampling pass persists the merged 5M-shot pool before any diagonalization; the tiny post-sample
 solve runs on 1 GPU (diag-gpu). Reuse the saved pool later for GPU recovery at large sqd_dim.
 
-    METHOD=rhf python run_fe4s4_sample_roquo.py           # real device (needs .env.local kobe creds)
+    METHOD=rhf python run_fe4s4_sample_roquo.py           # real device (needs .env.local creds)
     FE2S2_QSRC=random METHOD=rhf python run_fe4s4_sample_roquo.py   # dry-run, no IBM
 """
 
@@ -99,7 +99,8 @@ def main() -> None:
     pools = C.find_saved_pools(METHOD)
     C.samples_manifest_path(METHOD).write_text(json.dumps(pools, indent=2))
     print(
-        f"CAPTURE_FE4S4_SAMPLE_ROQUO {METHOD}: E={e:.6f} qsrc={qsrc} pools={len(pools)} ({dt:.0f}s)",
+        f"CAPTURE_FE4S4_SAMPLE_ROQUO {METHOD}: E={e:.6f} qsrc={qsrc} "
+        f"pools={len(pools)} ({dt:.0f}s)",
         flush=True,
     )
     for x in pools:
