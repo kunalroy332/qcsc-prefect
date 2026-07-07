@@ -1,6 +1,7 @@
 """Molecule geometry definition for quantum algorithms."""
 
 import io
+import os
 from typing import Annotated
 
 import numpy as np
@@ -88,8 +89,10 @@ def _build_property(
     nuclear_repulsion_energy = mf.mol.energy_nuc()
     num_elec_a, num_elec_b = mf.mol.nelec
 
-    # Run CCSD
+    # Run CCSD (amplitude seed for the LUCJ ansatz). Raise max_cycle + DIIS for hard active spaces.
     mycc = cc.CCSD(mf)
+    mycc.max_cycle = int(os.environ.get("SEED_CCSD_MAX_CYCLE", "200"))
+    mycc.diis_space = 12
     mycc.kernel()
     t2 = mycc.t2
 
@@ -159,8 +162,12 @@ def _build_property_uhf(
     nuclear_repulsion_energy = mf.mol.energy_nuc()
     num_elec_a, num_elec_b = mf.mol.nelec
 
-    # Run UCCSD; t2 is the tuple (t2aa, t2ab, t2bb).
+    # Run UCCSD; t2 is the tuple (t2aa, t2ab, t2bb). Strongly-correlated Fe-S active spaces do not
+    # converge in the default 50 cycles; raise max_cycle + DIIS so the amplitude seed for the LUCJ
+    # ansatz is well-formed (override via SEED_CCSD_MAX_CYCLE).
     mycc = cc.UCCSD(mf)
+    mycc.max_cycle = int(os.environ.get("SEED_CCSD_MAX_CYCLE", "200"))
+    mycc.diis_space = 12
     mycc.kernel()
     t2_aa, t2_ab, t2_bb = mycc.t2
 
