@@ -56,7 +56,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--config", type=Path, help="Path to TOML/JSON config file.")
 
-    parser.add_argument("--hpc-target", choices=["miyabi", "fugaku"])
+    parser.add_argument("--hpc-target", choices=["miyabi", "fugaku", "slurm"])
     parser.add_argument("--project")
     parser.add_argument("--group")
     parser.add_argument("--queue")
@@ -79,6 +79,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--fugaku-gfscache")
     parser.add_argument("--fugaku-spack-modules", nargs="+")
     parser.add_argument("--fugaku-mpi-options-for-pjm", nargs="*")
+
+    # Slurm (e.g. ROQUO) knobs. --queue carries the partition and --project the account by default;
+    # these override when set. slurm_qpu is emitted as #SBATCH --qpu (a ROQUO extension).
+    parser.add_argument("--slurm-account")
+    parser.add_argument("--slurm-partition")
+    parser.add_argument("--slurm-qpu")
+    parser.add_argument("--slurm-memory")
+    parser.add_argument("--slurm-ntasks", type=int)
 
     parser.add_argument("--script-filename")
     parser.add_argument("--metrics-artifact-key")
@@ -203,6 +211,13 @@ def _default_block_names(*, hpc_target: str, solver_mode: str) -> dict[str, str]
             "hpc_profile_block_name": "hpc-miyabi-sbd-gpu" if is_gpu else "hpc-miyabi-sbd",
             "solver_block_name": "davidson-solver-gpu" if is_gpu else "davidson-solver",
         }
+    if hpc_target == "slurm":
+        return {
+            "profile_name": "sbd-gpu" if is_gpu else "sbd-mpi",
+            "execution_profile_block_name": "exec-sbd-slurm-gpu" if is_gpu else "exec-sbd-slurm",
+            "hpc_profile_block_name": "hpc-slurm-sbd-gpu" if is_gpu else "hpc-slurm-sbd",
+            "solver_block_name": "davidson-solver-gpu" if is_gpu else "davidson-solver",
+        }
     return {
         "profile_name": "sbd-gpu" if is_gpu else "sbd-mpi",
         "execution_profile_block_name": "exec-sbd-fugaku-gpu" if is_gpu else "exec-sbd-fugaku",
@@ -284,6 +299,11 @@ def _env_values() -> dict[str, Any]:
         "fugaku_gfscache": env_first_str("FUGAKU_GFSCACHE"),
         "fugaku_spack_modules": env_first_csv("FUGAKU_SPACK_MODULES"),
         "fugaku_mpi_options_for_pjm": env_first_csv("FUGAKU_MPI_OPTIONS_FOR_PJM"),
+        "slurm_account": env_first_str("SBD_SLURM_ACCOUNT"),
+        "slurm_partition": env_first_str("SBD_SLURM_PARTITION"),
+        "slurm_qpu": env_first_str("SBD_SLURM_QPU"),
+        "slurm_memory": env_first_str("SBD_SLURM_MEMORY"),
+        "slurm_ntasks": env_int("SBD_SLURM_NTASKS"),
         "script_filename": env_first_str("SBD_SCRIPT_FILENAME"),
         "metrics_artifact_key": env_first_str("SBD_METRICS_ARTIFACT_KEY"),
         "command_block_name": env_first_str("SBD_CMD_BLOCK_NAME"),
@@ -332,11 +352,29 @@ def main() -> None:
         .strip()
         .lower()
     )
-    if hpc_target not in {"miyabi", "fugaku"}:
-        raise RuntimeError("'hpc_target' must be either 'miyabi' or 'fugaku'.")
+    if hpc_target not in {"miyabi", "fugaku", "slurm"}:
+        raise RuntimeError("'hpc_target' must be 'miyabi', 'fugaku', or 'slurm'.")
     is_miyabi = hpc_target == "miyabi"
+    is_slurm = hpc_target == "slurm"
 
-    if is_miyabi:
+    if is_slurm:
+        # For Slurm the "project" carries the Slurm --account (--slurm-account wins over --project).
+        project = _pick_value(
+            args.slurm_account,
+            config.get("slurm_account"),
+            env.get("slurm_account"),
+            args.project,
+            config.get("project"),
+            env.get("project"),
+            args.group,
+            config.get("group"),
+            env.get("group"),
+        )
+        if not project:
+            raise RuntimeError(
+                "Set the Slurm account via --slurm-account/SBD_SLURM_ACCOUNT (or --project)."
+            )
+    elif is_miyabi:
         project = _pick_value(
             args.project,
             config.get("project"),
@@ -364,11 +402,26 @@ def main() -> None:
             "or use SBD_GROUP/FUGAKU_GROUP/FUGAKU_PROJECT."
         )
 
-    queue = _pick_value(args.queue, config.get("queue"), env.get("queue"))
-    if not queue:
-        raise RuntimeError(
-            "Set 'queue' in --config/--queue or SBD_QUEUE/MIYABI_PBS_QUEUE/FUGAKU_RSCGRP."
+    # For Slurm the "queue" carries the partition (--slurm-partition wins over --queue).
+    if is_slurm:
+        queue = _pick_value(
+            args.slurm_partition,
+            config.get("slurm_partition"),
+            env.get("slurm_partition"),
+            args.queue,
+            config.get("queue"),
+            env.get("queue"),
         )
+        if not queue:
+            raise RuntimeError(
+                "Set the Slurm partition via --slurm-partition/SBD_SLURM_PARTITION (or --queue)."
+            )
+    else:
+        queue = _pick_value(args.queue, config.get("queue"), env.get("queue"))
+        if not queue:
+            raise RuntimeError(
+                "Set 'queue' in --config/--queue or SBD_QUEUE/MIYABI_PBS_QUEUE/FUGAKU_RSCGRP."
+            )
 
     work_dir = _pick_value(args.work_dir, config.get("work_dir"), env.get("work_dir"))
     if not work_dir:
@@ -386,7 +439,13 @@ def main() -> None:
         env.get("sbd_executable_uhf"),
     )
 
-    launcher_default = "mpiexec.hydra" if is_miyabi else "mpiexec"
+    if is_miyabi:
+        launcher_default = "mpiexec.hydra"
+    elif is_slurm:
+        # Run the diag binary directly inside the Slurm allocation (single node); no MPI launcher.
+        launcher_default = "single"
+    else:
+        launcher_default = "mpiexec"
     launcher = str(
         _pick_value(args.launcher, config.get("launcher"), env.get("launcher"), launcher_default)
     ).strip()
@@ -537,12 +596,18 @@ def main() -> None:
         )
     ).strip()
 
+    if is_miyabi:
+        script_default = "sbd_solver.pbs"
+    elif is_slurm:
+        script_default = "sbd_solver.slurm"
+    else:
+        script_default = "sbd_solver.pjm"
     script_filename = str(
         _pick_value(
             args.script_filename,
             config.get("script_filename"),
             env.get("script_filename"),
-            "sbd_solver.pbs" if is_miyabi else "sbd_solver.pjm",
+            script_default,
         )
     ).strip()
 
@@ -604,7 +669,26 @@ def main() -> None:
     if sbd_executable_uhf:
         executable_map[uhf_key] = str(Path(str(sbd_executable_uhf)).expanduser().resolve())
 
-    if is_miyabi:
+    if is_slurm:
+        slurm_qpu = _pick_value(args.slurm_qpu, config.get("slurm_qpu"), env.get("slurm_qpu"))
+        slurm_memory = _pick_value(
+            args.slurm_memory, config.get("slurm_memory"), env.get("slurm_memory")
+        )
+        slurm_ntasks = _pick_value(
+            args.slurm_ntasks, config.get("slurm_ntasks"), env.get("slurm_ntasks")
+        )
+        HPCProfileBlock(
+            hpc_target="slurm",
+            queue_cpu=str(queue),      # partition
+            queue_gpu=str(queue),
+            project_cpu=str(project),  # account
+            project_gpu=str(project),
+            executable_map=executable_map,
+            slurm_qpu=str(slurm_qpu) if slurm_qpu else None,
+            slurm_memory=str(slurm_memory) if slurm_memory else None,
+            slurm_ntasks=int(slurm_ntasks) if slurm_ntasks else None,
+        ).save(hpc_profile_block_name, overwrite=True)
+    elif is_miyabi:
         HPCProfileBlock(
             hpc_target="miyabi",
             queue_cpu=str(queue),
