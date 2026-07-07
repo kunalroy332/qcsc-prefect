@@ -34,13 +34,46 @@ from pathlib import Path
 # ---------------------------------------------------------------------------------------------
 # System under study
 # ---------------------------------------------------------------------------------------------
-MOLECULE = "fe2s2"
-# Fe2S2 40q active space: 30 electrons in 20 spatial orbitals, MS2=0 (singlet). RHF and UHF are
-# both built from THIS single FCIDUMP; the difference is entirely in the solver.
-FCIDUMP = os.environ.get(
-    "FE2S2_FCIDUMP",
-    "/2ndfs/ra010014/u14924_space/sweep/fe2s2_40q.fcidump",
-)
+# ---------------------------------------------------------------------------------------------
+# Molecule registry. Select with FE_MOL (default "fe2s2" so existing Fe2S2 scripts are unchanged).
+# RHF and UHF are both built from a molecule's single FCIDUMP; the difference is in the solver.
+#   fe2s2: 2Fe-2S, 30e in 20 orbitals, MS2=0 -> 40 qubits
+#   fe4s4: 4Fe-4S, 54e in 36 orbitals, MS2=0 -> 72 qubits
+# Each molecule's FCIDUMP path can be overridden by <MOL>_FCIDUMP (e.g. FE4S4_FCIDUMP); the default
+# points at the Fugaku location, and the ROQUO launchers export the local path.
+# ---------------------------------------------------------------------------------------------
+MOLECULES: dict[str, dict] = {
+    "fe2s2": {
+        "norb": 20, "nelec": 30, "ms2": 0,
+        "default_fcidump": "/2ndfs/ra010014/u14924_space/sweep/fe2s2_40q.fcidump",
+    },
+    "fe4s4": {
+        "norb": 36, "nelec": 54, "ms2": 0,
+        "default_fcidump": "/2ndfs/ra010014/u14924_space/sweep/fcidump_Fe4S4_MO.txt",
+    },
+}
+
+MOLECULE = os.environ.get("FE_MOL", "fe2s2").strip().lower()
+if MOLECULE not in MOLECULES:
+    raise ValueError(f"FE_MOL must be one of {tuple(MOLECULES)}, got {MOLECULE!r}")
+
+
+def mol_config(mol: str | None = None) -> dict:
+    """Return the registry entry for a molecule (defaults to the FE_MOL selection)."""
+    m = (mol or MOLECULE).strip().lower()
+    if m not in MOLECULES:
+        raise ValueError(f"molecule must be one of {tuple(MOLECULES)}, got {m!r}")
+    return MOLECULES[m]
+
+
+def fcidump_path(mol: str | None = None) -> str:
+    """FCIDUMP path for a molecule: <MOL>_FCIDUMP env override, else the registry default."""
+    m = (mol or MOLECULE).strip().lower()
+    return os.environ.get(f"{m.upper()}_FCIDUMP", mol_config(m)["default_fcidump"])
+
+
+# Module-level default for the selected molecule (back-compat with scripts that read C.FCIDUMP).
+FCIDUMP = fcidump_path(MOLECULE)
 
 METHODS = ("uhf", "rhf")
 
@@ -57,36 +90,40 @@ def runs_root() -> Path:
     return sweep_root() / "runs"
 
 
-def run_dir(method: str) -> Path:
-    """runs/<mol>_<method>/ for the given method ("uhf" | "rhf")."""
+def run_dir(method: str, mol: str | None = None) -> Path:
+    """runs/<mol>_<method>/ for the given method ("uhf" | "rhf"). mol defaults to FE_MOL."""
     method = method.lower()
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}, got {method!r}")
-    return runs_root() / f"{MOLECULE}_{method}"
+    m = (mol or MOLECULE).strip().lower()
+    return runs_root() / f"{m}_{method}"
 
 
-def run_subdirs(method: str) -> dict[str, Path]:
+def run_subdirs(method: str, mol: str | None = None) -> dict[str, Path]:
     """Create (if missing) and return the samples/recover/post subdirs for a run."""
-    base = run_dir(method)
+    base = run_dir(method, mol)
     dirs = {name: base / name for name in ("samples", "recover", "post")}
     for d in dirs.values():
         d.mkdir(parents=True, exist_ok=True)
     return dirs
 
 
-def combined_post_dir() -> Path:
-    d = runs_root() / f"{MOLECULE}_post"
+def combined_post_dir(mol: str | None = None) -> Path:
+    m = (mol or MOLECULE).strip().lower()
+    d = runs_root() / f"{m}_post"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def refs_path() -> Path:
-    return runs_root() / "refs.json"
+def refs_path(mol: str | None = None) -> Path:
+    """Molecule-scoped references file: runs/<mol>_refs.json (fe2s2 keeps legacy runs/refs.json)."""
+    m = (mol or MOLECULE).strip().lower()
+    return runs_root() / ("refs.json" if m == "fe2s2" else f"{m}_refs.json")
 
 
-def prefect_home(method: str) -> Path:
+def prefect_home(method: str, mol: str | None = None) -> Path:
     """Isolated Prefect home per run so concurrent flows never clash on one SQLite db."""
-    return run_dir(method) / "prefect_home"
+    return run_dir(method, mol) / "prefect_home"
 
 
 # ---------------------------------------------------------------------------------------------

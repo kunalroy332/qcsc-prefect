@@ -150,6 +150,9 @@ algorithms/sbd/sweep/runs/
 algorithms/sbd/sweep/work_*/
 algorithms/sbd/sweep/ph_*/
 algorithms/sbd/sweep/prefect_home/
+# FCIDUMP integral files are data, not code (some are 10s of MB) -- never commit.
+algorithms/sbd/sweep/*.fcidump
+algorithms/sbd/sweep/fcidump_*.txt
 
 # Spyder project settings
 .spyderproject
