@@ -68,6 +68,12 @@ case "${QCSC_PREFECT_EXECUTABLE}" in
     ;;
 esac
 
+{% if launcher == "srun" -%}
+{# srun inside an sbatch inherits SLURM_CPUS_PER_TASK / SLURM_TRES_PER_TASK from the parent
+   allocation, which conflicts with this job's --cpus-per-task ("cpus-per-task set by two
+   different environment variables"). Unset them so srun uses this script's #SBATCH values. #}
+unset SLURM_CPUS_PER_TASK SLURM_TRES_PER_TASK
+{% endif -%}
 {% if launcher != "single" -%}
 {{ launcher }}{% if mpi_options is defined %} {{ mpi_options | join(' ') }}{% endif %} "${QCSC_PREFECT_EXECUTABLE}"
 {%- else -%}
