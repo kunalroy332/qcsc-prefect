@@ -20,7 +20,21 @@ import time
 import fe2s2_common as C  # FE_MOL=fe4s4 selects the 4Fe-4S FCIDUMP + runs/fe4s4_* layout
 
 TAG = "fe4s4_sample"
-METHOD = os.environ.get("FE4S4_METHOD", "rhf")  # RHF case (compare like Fe2S2)
+METHOD = os.environ.get("FE4S4_METHOD", "uhf")  # UHF (open-shell) case
+# Large-node solver profile: square comm grid (adet x bdet x task). 100 = 10x10x1. Override with
+# FE4S4_NODES + FE4S4_ADET/FE4S4_BDET (must satisfy adet*bdet*task == nodes, a perfect square grid).
+NODES = int(os.environ.get("FE4S4_NODES", "100"))
+ADET = int(os.environ.get("FE4S4_ADET", "10"))
+BDET = int(os.environ.get("FE4S4_BDET", "10"))
+QUEUE = os.environ.get("FE4S4_QUEUE", "large")
+
+# Prefect's own usage telemetry contends on the ephemeral SQLite DB ("database is locked" on the
+# TELEMETRY_SESSION insert). Disable it; it is unrelated to our workflow data.
+os.environ.setdefault("PREFECT_SERVER_ANALYTICS_ENABLED", "false")
+os.environ.setdefault("PREFECT_TELEMETRY_ENABLED", "false")
+os.environ.setdefault("SBD_TASK_RUNNER", "concurrent")
+os.environ.setdefault("PREFECT_SERVER_DATABASE_TIMEOUT", "60")
+os.environ.setdefault("PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS", "120")
 
 
 def main() -> None:
@@ -43,10 +57,9 @@ def main() -> None:
     os.environ["PREFECT_LOCAL_STORAGE_PATH"] = str(C.prefect_home(METHOD) / "storage")
     C.prefect_home(METHOD).mkdir(parents=True, exist_ok=True)
 
-    # 1. Solver block. 72q sampling pass: the persist step saves the pool before diag, so the
-    #    solver here diagonalizes only a small seed subspace -> a single node is enough. The heavy
-    #    3e8 solve is the recovery job. DD(XY4)+measure-twirling, carryover on. Same conditions as
-    #    the Fe2S2 FE_sample run, with --method rhf.
+    # 1. Solver block on a large-node Fugaku grid (UHF). The sampling pass still runs the solver
+    #    once, so give it a real comm grid (adet x bdet x task, square, product == NODES) matching
+    #    the rec10 1600-node pattern. DD(XY4)+measure-twirling, carryover on, 5M shots / 5 batches.
     subprocess.run(
         [
             p["python"], os.path.join(p["sbd"], "create_blocks.py"),
@@ -54,9 +67,12 @@ def main() -> None:
             "--method", METHOD,
             "--solver-mode", "fugaku",
             "--project", "ra010014", "--group", "ra010014",
-            "--queue", "small",
+            "--queue", QUEUE,
             "--fugaku-gfscache", "/vol0004:/vol0002",
-            "--num-nodes", "1", "--mpiprocs", "1", "--ompthreads", "48",
+            "--num-nodes", str(NODES), "--mpiprocs", str(NODES), "--ompthreads", "48",
+            "--launcher", "mpiexec", "--mpi-options", f"-n {NODES}",
+            "--fugaku-mpi-options-for-pjm", "max-proc-per-node=1",
+            "--adet-comm-size", str(ADET), "--bdet-comm-size", str(BDET), "--task-comm-size", "1",
             "--carryover-ratio", "0.5", "--carryover-type", "1",
             "--solver-timeout-seconds", "43200",
             "--work-dir", str(C.run_dir(METHOD) / "work_sample"),
