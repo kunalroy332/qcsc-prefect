@@ -1,0 +1,298 @@
+% =====================================================================================
+%  SQD with configuration recovery on ROQUO (GB200) — UHF & RHF on Fe-S active spaces
+%  Self-contained Overleaf/LaTeX summary for presentation (2026-07-08).
+%
+%  Compile: pdflatex presentation.tex  (twice, for references).
+%  Figures expected alongside this file (see \graphicspath); placeholders are noted
+%  where a run is still in progress.
+% =====================================================================================
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{longtable}
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue}
+\graphicspath{{./}{figures/}}
+
+\lstset{basicstyle=\ttfamily\footnotesize, breaklines=true, frame=single,
+        backgroundcolor=\color{gray!8}, columns=fullflexible}
+
+\title{\textbf{Quantum--Classical SQD with Configuration Recovery on ROQUO (GB200)}\\
+       \large UHF and RHF closed-loop pipeline on Fe$_2$S$_2$ (40q) and Fe$_4$S$_4$ (72q)}
+\author{QCSC / \texttt{qcsc-prefect} --- branch \texttt{kk/feature/uhf}}
+\date{2026-07-08}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We report a closed-loop Sample-based Quantum Diagonalization (SQD) pipeline with
+self-consistent \emph{configuration recovery}, run end-to-end through Prefect on the RIKEN
+\textbf{ROQUO} GB200 GPU supercomputer. Quantum samples are drawn from IBM hardware
+(\texttt{ibm\_kobe}); the selected-CI diagonalization runs on the GB200 GPU via a newly built
+\texttt{nvc++} solver (\texttt{diag-gpu}). We demonstrate the recovery effect for both the
+unrestricted (UHF) and restricted (RHF) reference on two iron--sulfur active spaces:
+Fe$_2$S$_2$ (40 qubits, 30e/20o) and Fe$_4$S$_4$ (72 qubits, 54e/36o), benchmarked against
+UHF, UCCSD, and CCSD(T). All orchestration is Prefect-native (no bespoke driver): the flow
+submits each GPU solve as a Slurm job and polls it, mirroring the existing Fugaku (PJM) and
+Miyabi (PBS) targets.
+\end{abstract}
+
+\tableofcontents
+
+% =====================================================================================
+\section{What was done (since Wed.\ 2026-07-01)}
+% =====================================================================================
+Two threads of work: (i) a molecule-parametrized \emph{recovery} harness with per-iteration
+telemetry, and (ii) bringing the pipeline up on ROQUO's GB200 GPUs through Prefect's Slurm
+target, including building the GPU solver with the newly installed \texttt{nvc++}. The headline
+scientific result is the first 72-qubit (Fe$_4$S$_4$) SQD recovery trajectory on GB200 GPU.
+
+\paragraph{Highlights.}
+\begin{itemize}
+  \item \textbf{Per-iteration recovery telemetry.} Added a \texttt{recovery\_trace} to the SQD
+        walker so every configuration-recovery pass records energy, subspace dimension, spin
+        density ($2S_z$), useful-determinant fraction, and occupancies --- previously only the
+        best pass survived, so the recovery \emph{curve} was unrecoverable.
+  \item \textbf{Molecule-parametrized harness.} One code path drives both Fe$_2$S$_2$ and
+        Fe$_4$S$_4$ (select via \texttt{FE\_MOL}); ``sample once, reuse'' persists the 5\,M-shot
+        pool and re-diagonalizes offline (\texttt{quantum\_source="saved"}).
+  \item \textbf{ROQUO GPU build.} Built \texttt{diag-gpu}/\texttt{diag-gpu\_uhf} with
+        \texttt{nvc++} 26.5 (\texttt{-cuda -gpu=cc100}) for GB200 (sm\_100) --- the previously
+        blocking \texttt{\_\_syncwarp} issue is a non-problem for \texttt{nvc++}.
+  \item \textbf{Prefect Slurm target for GPU.} Extended \texttt{create\_blocks.py} and the Slurm
+        adapter so a GPU solve is submitted as an \texttt{sbatch} job (\texttt{--gres=gpu:1},
+        \texttt{module load cuda/13.2 hpcx/2.50}, launched with \texttt{srun --gpu-bind=closest}
+        over PMIx). The orchestrator only submits and polls (\texttt{sacct}), keeping it light.
+  \item \textbf{References.} UHF/UCCSD/CCSD(T) computed from the FCIDUMP (convergence hardened:
+        \texttt{max\_cycle=300}, DIIS, level shift). HCI is skipped above 24 orbitals
+        (intractable at 72q); DMRG deferred to a block2 reference environment.
+\end{itemize}
+
+% =====================================================================================
+\section{ROQUO: features, and how it compares to Miyabi}
+% =====================================================================================
+\subsection{ROQUO at a glance}
+\begin{longtable}{@{}p{0.28\textwidth}p{0.66\textwidth}@{}}
+\toprule
+System & Supercomputer ROQUO (RIKEN R-CCS, Kobe); quantum--HPC integration platform \\
+Compute nodes & 135$\times$ NVIDIA GB200 NVL4 (8 racks qr01--qr08) \\
+Per node & 2$\times$ Grace (Arm Neoverse-V2, 144 cores, SMT off) + 4$\times$ Blackwell GPU
+           (GB200 NVL4, Grace--Blackwell NVLink-coupled) \\
+GPU arch & Blackwell, CUDA compute capability 10.0 (build \texttt{sm\_100} / \texttt{cc100}, CUDA 13) \\
+CPU arch & \textbf{compute nodes arm64 (aarch64)}; \textbf{login nodes x86\_64} --- build on a compute node \\
+Interconnect & Quantum-X800 InfiniBand (4 links/node); full BW in-rack, 4:1 across racks \\
+Scheduler & Slurm (cluster \texttt{roquo}, default partition \texttt{roquo}); MPI = HPC-X (OpenMPI\,5 / PMIx) \\
+Node plans & auto-round to qtr (1 GPU/36c/400G), half (2/72/800), full (4/144/1600) \\
+Storage & \texttt{/home} (Lustre-backed, persistent); \texttt{\$SLURM\_SCRATCH} (per-job local NVMe, 7\,TB) \\
+OS & Rocky Linux 9.8 \\
+\bottomrule
+\end{longtable}
+
+\subsection{Similar to / different from Miyabi}
+\textbf{Similar:} both are Grace(+GPU) systems; both are driven by the \emph{same} Prefect
+executor pattern --- the flow orchestrates and submits \emph{each} solve as a scheduler job,
+then polls terminal status. The domain code (SQD flow, recovery loop, integral build) is
+identical across targets.
+
+\textbf{Different:}
+\begin{itemize}
+  \item \textbf{Scheduler:} ROQUO uses \textbf{Slurm} (\texttt{sbatch}/\texttt{srun}/\texttt{sacct},
+        PMIx MPI); Miyabi uses \textbf{PBS} (\texttt{qsub}/\texttt{qstat}); Fugaku uses \textbf{PJM}
+        (\texttt{pjsub}). We added a first-class \texttt{slurm} \texttt{hpc\_target} alongside the
+        existing \texttt{miyabi}/\texttt{fugaku} ones.
+  \item \textbf{GPU:} ROQUO is Blackwell (\texttt{sm\_100}), whole-node = 4 GPUs; the SBD GPU
+        binary is built with \texttt{nvc++} and launched one MPI rank per GPU.
+  \item \textbf{Resource model:} ROQUO auto-rounds GPU/CPU/memory to node plans (qtr/half/full);
+        no explicit ``select'' string as on PJM/PBS.
+  \item \textbf{Arch split:} login x86\_64 vs compute aarch64 --- the Prefect orchestrator must run
+        on a compute node (aarch64 venv), unlike a single-arch cluster.
+\end{itemize}
+
+% =====================================================================================
+\section{The closed-loop pipeline (UHF and RHF)}
+% =====================================================================================
+The pipeline is identical for UHF and RHF; the reference (and thus the LUCJ ansatz + the
+diagonalizer binary) is selected by the solver block's \texttt{--method}.
+
+\begin{enumerate}
+  \item \textbf{Integrals \& ansatz seed.} From the FCIDUMP, build (U)HF + (U)CCSD; the CCSD
+        amplitudes seed the LUCJ circuit parameters.
+  \item \textbf{Quantum sampling (once).} Run the LUCJ circuit on \texttt{ibm\_kobe} (5\,M shots,
+        5 batches; DD (XY4) + measurement twirling). Persist the merged bitstring pool to Lustre
+        --- \emph{sampled once, reused forever} (\texttt{quantum\_source="saved"}).
+  \item \textbf{Configuration recovery (multi-iteration).} For each pass: recover configurations
+        from the saved pool using the current occupancies, Hamming-weight post-select, subsample a
+        subspace of dimension \texttt{sqd\_dim}=$3\times10^8$, and diagonalize on GB200 GPU. Feed
+        the new occupancies into the next pass. Each pass is a \texttt{sbatch} GPU job.
+  \item \textbf{References.} UHF/UCCSD/CCSD(T) as flat comparison lines.
+  \item \textbf{Figures.} Energy vs recovery iteration + diagnostics; cross-system view.
+\end{enumerate}
+
+\subsection{How to run it (precise, end-to-end)}
+\begin{lstlisting}[language=bash]
+# --- ROQUO login (x86_64) -> pull code, then work on a compute node (aarch64) ---
+ssh -i ~/.ssh/roquo_ed25519 q0000219@login.roquo.qc.r-ccs.riken.jp
+cd ~/qcsc-prefect && git pull origin kk/feature/uhf
+
+# 0) One-time: build the GPU solver on a COMPUTE node (aarch64, nvc++)
+srun --account=q0000219 --gres=gpu:1 --time=00:25:00 bash -lc '
+  NV=/opt/nvidia/hpc_sdk/Linux_aarch64/26.5
+  export PATH=$NV/compilers/bin:$NV/comm_libs/hpcx/bin:$PATH
+  export OMPI_CXX=nvc++
+  cd ~/qcsc-prefect/algorithms/sbd/native
+  CCCOM=mpic++ CCFLAGS="-std=c++17 -mp -cuda -fast -gpu=mem:unified,cc100 -DSBD_THRUST" \
+    SYSLIB="/usr/lib64/libopenblaso.so.0 -lgfortran" bash build_sbd_gpu.sh          # diag-gpu
+  UHF=1 CCCOM=mpic++ CCFLAGS="-std=c++17 -mp -cuda -fast -gpu=mem:unified,cc100 -DSBD_THRUST -D_UHF" \
+    SYSLIB="/usr/lib64/libopenblaso.so.0 -lgfortran" bash build_sbd_gpu.sh          # diag-gpu_uhf
+'
+
+# 1) Credentials (gitignored): sweep/.env.local with IBM_API_KEY / IBM_CRN / IBM_BACKEND=ibm_kobe
+# 2) Sample once on kobe (UHF or RHF); pool persists on Lustre
+cd ~/qcsc-prefect/algorithms/sbd/sweep
+METHOD=uhf sbatch --gres=gpu:1 --time=03:00:00 run_fe4s4_sample_roquo.sh   # (RHF: METHOD=rhf)
+
+# 3) Multi-iteration GPU recovery from the saved pool (each solve = its own sbatch GPU job)
+METHOD=uhf FE4S4_RECSTEPS=5 FE4S4_SQD_DIM=300000000 FE4S4_POOL=<persisted_pool.npz> \
+  sbatch --gres=gpu:1 --time=04:00:00 run_fe4s4_gpu_roquo.sh                # (RHF: METHOD=rhf)
+
+# 4) References + figures
+sbatch --gres=gpu:1 run_fe4s4_refs_roquo.sh        # UHF/UCCSD/CCSD(T) -> runs/fe4s4_refs.json
+python fe_twopanel_plot.py                          # two-panel figure
+\end{lstlisting}
+
+\paragraph{Key ROQUO-specific settings (baked into the runners).}
+\begin{itemize}
+  \item \texttt{--hpc-target slurm --solver-mode gpu --slurm-gres gpu:1}; launcher \texttt{srun},
+        MPI options \texttt{--gpu-bind=closest} (PMIx).
+  \item \texttt{diag-gpu} is an MPI binary: \emph{must} launch under \texttt{srun}/\texttt{mpirun}
+        (one rank per GPU); it OOMs if a single 72q solve is split across ranks, so one solve per
+        GPU. \texttt{n\_batches=1} (concurrent solves on one GPU OOM).
+  \item \texttt{PREFECT\_HOME} on Lustre (pool persistence); \texttt{PREFECT\_API\_REQUEST\_TIMEOUT=600}
+        (long child-solve polls exceed the 60\,s default); Prefect telemetry disabled.
+\end{itemize}
+
+% =====================================================================================
+\section{Results}
+% =====================================================================================
+\subsection{Fe$_4$S$_4$ (72 qubits): UHF recovery on GB200 GPU}
+The UHF-SQD energy drops from $-326.197$ Ha (iteration 1) and converges by iteration~3 to
+$\approx -326.519$ Ha --- about \textbf{520\,mHa below the UHF reference}, recovering
+$\sim$44\% of the UHF$\rightarrow$CCSD(T) correlation gap on a full $3\times10^8$-dimensional
+subspace ($2S_z=0$ throughout). Each solve took $\sim$65--400\,s on one GB200.
+
+\begin{table}[h]\centering
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+ & \multicolumn{5}{c}{Fe$_4$S$_4$ UHF-SQD recovery iteration (Ha)} \\
+\cmidrule(l){2-6}
+Step & 1 & 2 & 3 & 4 & 5 \\
+\midrule
+$E$ & $-326.1972$ & $-326.4973$ & $-326.5190$ & $-326.5085$ & $-326.5138$ \\
+\bottomrule
+\end{tabular}
+\caption{Fe$_4$S$_4$ UHF-SQD recovery trajectory (sqd\_dim $=3\times10^8$, GB200 GPU).
+References: UHF $-325.9987$, UCCSD $-326.8678$, CCSD(T) $-327.1762$ Ha.}
+\end{table}
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.9\textwidth]{fe4s4_energy_vs_iter.png}
+\caption{\textbf{Fe$_4$S$_4$ (72q) UHF-SQD energy vs configuration-recovery iteration} on GB200
+GPU. Blue: SQD recovery curve. Dashed/dotted lines: UHF, UCCSD, CCSD(T) references. The recovery
+loop pulls the energy sharply below UHF within $\sim$3 iterations, toward the correlated
+references. \emph{[Figure: \texttt{fe4s4\_energy\_vs\_iter.png}]}}
+\end{figure}
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.95\textwidth]{fe4s4_panels.png}
+\caption{\textbf{Fe$_4$S$_4$ diagnostics per recovery iteration:} energy; error vs CCSD(T) (mHa);
+net subspace dimension ($3\times10^8$); spin density $\sum(n_\alpha-n_\beta)=2S_z$ ($\approx0$,
+confirming the singlet). \emph{[Figure: \texttt{fe4s4\_panels.png}]}}
+\end{figure}
+
+\subsection{Two-system view: Fe$_2$S$_2$ (40q) and Fe$_4$S$_4$ (72q)}
+\begin{figure}[h]\centering
+\includegraphics[width=0.98\textwidth]{fe_twopanel.png}
+\caption{\textbf{SQD on GB200 GPU across two Fe--S active spaces.} \emph{Left:} Fe$_2$S$_2$ (40q)
+UHF-SQD result vs its UHF/UCCSD/CCSD(T) references. \emph{Right:} Fe$_4$S$_4$ (72q) UHF-SQD
+recovery curve vs its references. Each panel has its own energy axis (the systems differ by
+$\sim$210\,Ha). \emph{[Figure: \texttt{fe\_twopanel.png}]}}
+\end{figure}
+
+\subsection{RHF case}
+\textbf{[PLACEHOLDER --- RHF run in progress.]} The RHF pipeline is identical to UHF with
+\texttt{--method rhf} (RHF reference, restricted diagonalizer \texttt{diag-gpu}). RHF was sampled
+on \texttt{ibm\_kobe} (5\,M shots; $E_{\text{sample}}=-326.547$ Ha) and the pool persisted; the
+5-iteration GPU recovery is running. On completion, the RHF recovery curve will be overlaid on the
+Fe$_4$S$_4$ panel for a direct RHF-vs-UHF comparison of the recovery effect. \emph{Fe$_2$S$_2$
+RHF (and a clean Fe$_2$S$_2$ UHF) recovery are queued for ROQUO as time permits (small/fast at
+40q).}
+
+\begin{figure}[h]\centering
+\fbox{\parbox[c][4cm][c]{0.8\textwidth}{\centering\emph{Placeholder: Fe$_4$S$_4$ RHF-vs-UHF
+recovery curves (\texttt{fe4s4\_rhf\_vs\_uhf.png}) --- to be inserted when the RHF recovery
+job completes.}}}
+\caption{RHF vs UHF recovery on Fe$_4$S$_4$ (72q). \emph{[Placeholder]}}
+\end{figure}
+
+% =====================================================================================
+\section{Commit history (since 2026-07-01)}
+% =====================================================================================
+All work is on branch \texttt{kk/feature/uhf}. Core library edits are committed; the experiment
+scratch (\texttt{algorithms/sbd/sweep/}) is intentionally untracked (synced to HPC via \texttt{scp}).
+
+\begin{longtable}{@{}llp{0.62\textwidth}@{}}
+\toprule
+Commit & Date & Change \\
+\midrule\endhead
+\texttt{d4747b3} & 07-07 & Fe2S2 RHF-vs-UHF recovery harness + per-step \texttt{recovery\_trace} \\
+\texttt{9e9d73d} & 07-07 & Add \textbf{Slurm} \texttt{hpc-target} to \texttt{create\_blocks} + ROQUO RHF launcher \\
+\texttt{886d8ff} & 07-07 & Point ROQUO RHF launcher at the transferred FCIDUMP path \\
+\texttt{43699d2} & 07-07 & Prefect ephemeral DB on node-local tmp for ROQUO run \\
+\texttt{34c261f} & 07-07 & Add \texttt{local} hpc-target; run solver in-allocation (no per-solve sbatch) \\
+\texttt{995474c} & 07-07 & Fix SQLite lock: ConcurrentTaskRunner + long DB timeout \\
+\texttt{34205f7} & 07-07 & Parametrize sweep harness by molecule (fe2s2 $|$ fe4s4) \\
+\texttt{6e7e3bf} & 07-07 & Add Fe4S4 72q Fugaku sampling launcher (5M shots, kobe) \\
+\texttt{86e8dba} & 07-07 & Fe4S4 sampling: UHF + large-node grid, disable telemetry, PJM orchestrator \\
+\texttt{4389188} & 07-07 & Fe4S4 sampling: default 60$\times$60 = 3600-node grid \\
+\texttt{230d364} & 07-07 & Fe4S4 sampling: PJM group + gfscache directives \\
+\texttt{1117f24} & 07-07 & Fe4S4 sampling orchestrator on mem2 (x86\_64); CCSD convergence controls \\
+\texttt{aef75f3} & 07-07 & Fe4S4 recovery from saved kobe pool (3e8, rec5) + data-area work dirs \\
+\texttt{160d27d} & 07-07 & Add ROQUO GB200 GPU recovery runner (\texttt{diag-gpu}) \\
+\texttt{e44d6e1} & 07-07 & Fix GPU launch: \texttt{mpirun} (diag-gpu is MPI) \\
+\texttt{ee60ab6} & 07-07 & GPU: run \texttt{diag-gpu} on 1 GPU (multi-rank OOMs) \\
+\texttt{523e04b} & 07-07 & Add ROQUO RHF sampling runner (kobe from compute node) \\
+\texttt{f7b9011} & 07-07 & GPU: \texttt{n\_batches=1} (fix concurrent-GPU OOM) \\
+\texttt{65bb8fa} & 07-07 & GPU: keep solver work\_dir on Lustre (\$SLURM\_SCRATCH breaks diag-gpu) \\
+\texttt{1599d36} & 07-07 & refs: guard empty \texttt{DMRG\_M} \\
+\texttt{a6c13ef} & 07-07 & \textbf{Slurm target GPU support} (\texttt{--gres}, \texttt{srun}/PMIx) \\
+\texttt{4c474ac} & 07-07 & Pass \texttt{srun/--gpu-bind} via env (argparse rejects \texttt{--flag} opts) \\
+\texttt{16d1439} & 07-07 & refs: fix \texttt{mycc.e\_tot()} $\to$ \texttt{e\_tot} \\
+\texttt{3f2d662} & 07-07 & slurm template: \texttt{unset SLURM\_CPUS\_PER\_TASK/TRES} before nested srun \\
+\texttt{c013ac3} & 07-08 & GPU runner: scan all telemetry artifacts for \texttt{recovery\_trace} \\
+\texttt{1dfdbdd} & 07-08 & GPU runner: \texttt{PREFECT\_API\_REQUEST\_TIMEOUT=600} (multi-step httpx fix) \\
+\texttt{ca869dd} & 07-08 & refs: skip HCI above \texttt{HCI\_MAX\_NORB} (hangs at 72q) \\
+\texttt{53fea0b} & 07-08 & RHF sampler: \texttt{PREFECT\_HOME} on Lustre so the pool persists \\
+\texttt{00030b5} & 07-08 & plot: molecule-aware output filenames \\
+\texttt{05c192c} & 07-08 & plot: error panel falls back to CCSD(T)/UCCSD when no DMRG \\
+\texttt{aa20e57} & 07-08 & cross-system \%-recovered figure \\
+\texttt{e1e82f3} & 07-08 & Untrack \texttt{algorithms/sbd/sweep/}; gitignore experiment scratch \\
+\bottomrule
+\end{longtable}
+\emph{(Earlier July commits --- \texttt{12a4232}, \texttt{1a63b31}, \texttt{aac6a3f},
+\texttt{0361bae}, \texttt{b91dde5}, \texttt{b9023b1} --- added the carryover flag, shot-batch
+mitigation guard, single-walker eval, solver wait-timeout knob, and the persisted-sample-pool
+source that the ``sample once, reuse'' workflow depends on.)}
+
+\section{Summary}
+The SQD closed loop now runs natively on ROQUO GB200 GPUs through Prefect's Slurm target, with a
+GPU-accelerated selected-CI solver. On Fe$_4$S$_4$ (72 qubits) the UHF configuration-recovery loop
+converges within $\sim$3 iterations to $\sim$520\,mHa below UHF; the same pipeline is being run for
+RHF (72q) and for Fe$_2$S$_2$ (40q, both references). Every step --- sampling, persistence,
+multi-iteration recovery, references, and figures --- is reproducible from the commands above.
+
+\end{document}
