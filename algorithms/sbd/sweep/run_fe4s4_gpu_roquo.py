@@ -28,7 +28,10 @@ import fe2s2_common as C
 METHOD = os.environ.get("FE4S4_METHOD", "rhf")
 SQD_DIM = int(float(os.environ.get("FE4S4_SQD_DIM", "300000000")))
 RECSTEPS = int(os.environ.get("FE4S4_RECSTEPS", "5"))
-NBATCH = int(os.environ.get("FE4S4_NBATCH", "5"))
+# n_batches=1: the ConcurrentTaskRunner launches all batches at once, and N concurrent diag-gpu
+# procs on 1 GPU multiply GPU memory -> OOM (job 2305). One batch per recovery step fits and still
+# gives the full recovery-effect trajectory. Bump only with more GPUs / a memory-serialized runner.
+NBATCH = int(os.environ.get("FE4S4_NBATCH", "1"))
 OMP = int(os.environ.get("ROQUO_OMPTHREADS", "140"))
 
 # Node-local Prefect DB (Lustre home is slow/locks); keep the persisted storage on Lustre.
@@ -64,10 +67,15 @@ def main() -> None:
     diag_gpu = os.path.join(p["diag"], "diag-gpu")
     diag_gpu_uhf = os.path.join(p["diag"], "diag-gpu_uhf")
 
-    base = C.run_dir(METHOD)          # runs/fe4s4_<method>/ (Lustre; pool storage survives)
+    base = C.run_dir(METHOD)          # runs/fe4s4_<method>/ (Lustre; final JSON + pool survive here)
     (base / "recover").mkdir(parents=True, exist_ok=True)
-    prefect_home = NODE_TMP / f"ph_fe4s4_gpu_{METHOD}"
+    # Heavy per-solve I/O (43MB fcidump + det bins each solve) + the Prefect DB go on fast local NVMe
+    # scratch ($SLURM_SCRATCH, auto-wiped at job end) per the ROQUO storage guide, NOT Lustre home.
+    scratch = Path(os.environ.get("SLURM_SCRATCH", NODE_TMP))
+    prefect_home = scratch / f"ph_fe4s4_gpu_{METHOD}"
+    work_dir = scratch / f"work_gpu_recover_{METHOD}"
     prefect_home.mkdir(parents=True, exist_ok=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
     os.environ["PREFECT_HOME"] = str(prefect_home)
     os.environ["PREFECT_LOCAL_STORAGE_PATH"] = str(base / "prefect_home" / "storage")
     (base / "prefect_home" / "storage").mkdir(parents=True, exist_ok=True)
@@ -84,7 +92,7 @@ def main() -> None:
             "--walltime", "06:00:00",
             "--carryover-ratio", "0.5", "--carryover-type", "1",
             "--solver-timeout-seconds", "43200",
-            "--work-dir", str(base / "work_gpu_recover"),
+            "--work-dir", str(work_dir),
             "--saved-samples", ",".join(pools),
             "--iteration", "5", "--block", "20",
             "--sbd-executable", diag_gpu, "--sbd-executable-uhf", diag_gpu_uhf,
