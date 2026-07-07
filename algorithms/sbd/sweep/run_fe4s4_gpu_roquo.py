@@ -37,8 +37,13 @@ OMP = int(os.environ.get("ROQUO_OMPTHREADS", "140"))
 os.environ.setdefault("PREFECT_SERVER_ANALYTICS_ENABLED", "false")
 os.environ.setdefault("PREFECT_TELEMETRY_ENABLED", "false")
 os.environ.setdefault("SBD_TASK_RUNNER", "concurrent")
-os.environ.setdefault("PREFECT_SERVER_DATABASE_TIMEOUT", "60")
+os.environ.setdefault("PREFECT_SERVER_DATABASE_TIMEOUT", "120")
+os.environ.setdefault("PREFECT_SERVER_DATABASE_CONNECTION_TIMEOUT", "60")
 os.environ.setdefault("PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS", "120")
+# The client's HTTP request timeout defaults to 60s. During a long child-solve poll the single
+# ephemeral server can take >60s to answer an API call (e.g. block load) -> httpx.ReadTimeout that
+# kills the flow on step 1 of a multi-step recovery. Bump it way up.
+os.environ.setdefault("PREFECT_API_REQUEST_TIMEOUT", "600")
 os.environ.setdefault("OMP_NUM_THREADS", str(OMP))
 # launcher + mpi options via ENV (comma-split by create_blocks' env_csv). argparse --mpi-options
 # rejects '-'-prefixed tokens like --gpu-bind=closest, so pass them here instead. srun = PMIx.
