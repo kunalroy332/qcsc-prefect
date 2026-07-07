@@ -144,12 +144,20 @@ def _read_recovery_trace() -> list[dict]:
             arts = client.read_artifacts(
                 artifact_filter=ArtifactFilter(key=ArtifactFilterKey(any_=["sqd-telemetry"])),
             )
-            if not arts:
-                return []
-            data = json.loads(arts[0].data)
-            for rec in reversed(data):
-                if isinstance(rec, dict) and rec.get("recovery_trace"):
-                    return rec["recovery_trace"]
+            # There can be several sqd-telemetry artifacts (some empty); scan ALL of them and
+            # return the longest recovery_trace found. (Earlier bug: only arts[0] was read, which
+            # was often the empty one -> empty trace even though another artifact had it.)
+            best: list[dict] = []
+            for art in arts:
+                try:
+                    data = json.loads(art.data)
+                except Exception:
+                    continue
+                for rec in data if isinstance(data, list) else []:
+                    tr = rec.get("recovery_trace") if isinstance(rec, dict) else None
+                    if tr and len(tr) > len(best):
+                        best = tr
+            return best
     except Exception as exc:
         print(f"[warn] could not read recovery_trace ({exc}).")
     return []
