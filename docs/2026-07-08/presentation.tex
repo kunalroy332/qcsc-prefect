@@ -379,53 +379,77 @@ Parameter & Value & Meaning \\
 \end{longtable}
 
 % =====================================================================================
-\section{Commit history (since 2026-07-01)}
+\section{Commit history}
 % =====================================================================================
-All work is on branch \texttt{kk/feature/uhf}. Core library edits are committed; the experiment
-scratch (\texttt{algorithms/sbd/sweep/}) is intentionally untracked (synced to HPC via \texttt{scp}).
+All work is on branch \texttt{kk/feature/uhf} over the six-day window (2026-07-01 to 2026-07-08).
+Core library edits are committed; the experiment scratch (\texttt{algorithms/sbd/sweep/}) is
+intentionally untracked (synced to HPC via \texttt{scp}). All 48 commits are listed below,
+grouped by theme (oldest first).
 
-\begin{longtable}{@{}llp{0.62\textwidth}@{}}
+\begin{longtable}{@{}lp{0.78\textwidth}@{}}
 \toprule
-Commit & Date & Change \\
+Commit & Change \\
 \midrule\endhead
-\texttt{d4747b3} & 07-07 & Fe2S2 RHF-vs-UHF recovery harness + per-step \texttt{recovery\_trace} \\
-\texttt{9e9d73d} & 07-07 & Add \textbf{Slurm} \texttt{hpc-target} to \texttt{create\_blocks} + ROQUO RHF launcher \\
-\texttt{886d8ff} & 07-07 & Point ROQUO RHF launcher at the transferred FCIDUMP path \\
-\texttt{43699d2} & 07-07 & Prefect ephemeral DB on node-local tmp for ROQUO run \\
-\texttt{34c261f} & 07-07 & Add \texttt{local} hpc-target; run solver in-allocation (no per-solve sbatch) \\
-\texttt{995474c} & 07-07 & Fix SQLite lock: ConcurrentTaskRunner + long DB timeout \\
-\texttt{34205f7} & 07-07 & Parametrize sweep harness by molecule (fe2s2 $|$ fe4s4) \\
-\texttt{6e7e3bf} & 07-07 & Add Fe4S4 72q Fugaku sampling launcher (5M shots, kobe) \\
-\texttt{86e8dba} & 07-07 & Fe4S4 sampling: UHF + large-node grid, disable telemetry, PJM orchestrator \\
-\texttt{4389188} & 07-07 & Fe4S4 sampling: default 60$\times$60 = 3600-node grid \\
-\texttt{230d364} & 07-07 & Fe4S4 sampling: PJM group + gfscache directives \\
-\texttt{1117f24} & 07-07 & Fe4S4 sampling orchestrator on mem2 (x86\_64); CCSD convergence controls \\
-\texttt{aef75f3} & 07-07 & Fe4S4 recovery from saved kobe pool (3e8, rec5) + data-area work dirs \\
-\texttt{160d27d} & 07-07 & Add ROQUO GB200 GPU recovery runner (\texttt{diag-gpu}) \\
-\texttt{e44d6e1} & 07-07 & Fix GPU launch: \texttt{mpirun} (diag-gpu is MPI) \\
-\texttt{ee60ab6} & 07-07 & GPU: run \texttt{diag-gpu} on 1 GPU (multi-rank OOMs) \\
-\texttt{523e04b} & 07-07 & Add ROQUO RHF sampling runner (kobe from compute node) \\
-\texttt{f7b9011} & 07-07 & GPU: \texttt{n\_batches=1} (fix concurrent-GPU OOM) \\
-\texttt{65bb8fa} & 07-07 & GPU: keep solver work\_dir on Lustre (\$SLURM\_SCRATCH breaks diag-gpu) \\
-\texttt{1599d36} & 07-07 & refs: guard empty \texttt{DMRG\_M} \\
-\texttt{a6c13ef} & 07-07 & \textbf{Slurm target GPU support} (\texttt{--gres}, \texttt{srun}/PMIx) \\
-\texttt{4c474ac} & 07-07 & Pass \texttt{srun/--gpu-bind} via env (argparse rejects \texttt{--flag} opts) \\
-\texttt{16d1439} & 07-07 & refs: fix \texttt{mycc.e\_tot()} $\to$ \texttt{e\_tot} \\
-\texttt{3f2d662} & 07-07 & slurm template: \texttt{unset SLURM\_CPUS\_PER\_TASK/TRES} before nested srun \\
-\texttt{c013ac3} & 07-08 & GPU runner: scan all telemetry artifacts for \texttt{recovery\_trace} \\
-\texttt{1dfdbdd} & 07-08 & GPU runner: \texttt{PREFECT\_API\_REQUEST\_TIMEOUT=600} (multi-step httpx fix) \\
-\texttt{ca869dd} & 07-08 & refs: skip HCI above \texttt{HCI\_MAX\_NORB} (hangs at 72q) \\
-\texttt{53fea0b} & 07-08 & RHF sampler: \texttt{PREFECT\_HOME} on Lustre so the pool persists \\
-\texttt{00030b5} & 07-08 & plot: molecule-aware output filenames \\
-\texttt{05c192c} & 07-08 & plot: error panel falls back to CCSD(T)/UCCSD when no DMRG \\
-\texttt{aa20e57} & 07-08 & cross-system \%-recovered figure \\
-\texttt{e1e82f3} & 07-08 & Untrack \texttt{algorithms/sbd/sweep/}; gitignore experiment scratch \\
+\multicolumn{2}{@{}l}{\emph{Foundations: solver + recovery + saved-pool source}}\\
+\texttt{12a4232} & Stop dumping \texttt{matrixformwf.txt} from the SBD solver \\
+\texttt{1a63b31} & Add \texttt{carryover\_type} flag to actually enable determinant carryover \\
+\texttt{aac6a3f} & Guard shot-batch reset mitigation against an empty kept set \\
+\texttt{0361bae} & Allow \texttt{num\_walkers} below 4 for single-pass evaluation runs \\
+\texttt{b91dde5} & Expose solver wait timeout as a \texttt{create\_blocks} knob \\
+\texttt{b9023b1} & Persist merged sample pool and add a saved-samples source (``sample once, reuse'') \\
+\midrule
+\multicolumn{2}{@{}l}{\emph{Recovery harness + Slurm/ROQUO enablement}}\\
+\texttt{d4747b3} & Fe2S2 RHF-vs-UHF recovery harness + per-step \texttt{recovery\_trace} \\
+\texttt{9e9d73d} & Add \textbf{Slurm} \texttt{hpc-target} to \texttt{create\_blocks} + ROQUO RHF launcher \\
+\texttt{886d8ff} & Point ROQUO RHF launcher at the transferred FCIDUMP path \\
+\texttt{43699d2} & Prefect ephemeral DB on node-local tmp for ROQUO run \\
+\texttt{34c261f} & Add \texttt{local} hpc-target; run solver in-allocation (no per-solve sbatch) \\
+\texttt{995474c} & Fix SQLite lock: ConcurrentTaskRunner + long DB timeout \\
+\texttt{34205f7} & Parametrize sweep harness by molecule (fe2s2 $|$ fe4s4) \\
+\midrule
+\multicolumn{2}{@{}l}{\emph{Fe4S4 72q sampling (Fugaku, kobe)}}\\
+\texttt{6e7e3bf} & Add Fe4S4 72q Fugaku sampling launcher (5M shots, kobe) \\
+\texttt{c314521} & Lint fixes in Fe4S4 sample launcher \\
+\texttt{86e8dba} & Fe4S4 sampling: UHF + large-node grid, disable telemetry, PJM orchestrator \\
+\texttt{4389188} & Fe4S4 sampling: default 60$\times$60 = 3600-node grid \\
+\texttt{230d364} & Fe4S4 sampling: PJM group \texttt{ra010014} + gfscache directives \\
+\texttt{1117f24} & Fe4S4 sampling orchestrator on mem2 (x86\_64); CCSD convergence controls \\
+\texttt{aef75f3} & Fe4S4 recovery from saved kobe pool (3e8, rec5) + data-area work dirs \\
+\midrule
+\multicolumn{2}{@{}l}{\emph{ROQUO GB200 GPU: build + launch + memory/OOM fixes}}\\
+\texttt{160d27d} & Add ROQUO GB200 GPU recovery runner (\texttt{diag-gpu}) \\
+\texttt{e44d6e1} & Fix GPU launch: \texttt{mpirun} (diag-gpu is MPI) \\
+\texttt{ee60ab6} & GPU: run \texttt{diag-gpu} on 1 GPU (multi-rank OOMs) \\
+\texttt{523e04b} & Add ROQUO RHF sampling runner (kobe from compute node) \\
+\texttt{44b721a} & Lint fixes in ROQUO RHF sampler \\
+\texttt{f7b9011} & GPU: \texttt{n\_batches=1} (fix concurrent-GPU OOM) + scratch work dir \\
+\texttt{596f8c6} & Lint: shorten comment lines in GPU runner \\
+\texttt{1599d36} & refs: guard empty \texttt{DMRG\_M} \\
+\texttt{65bb8fa} & GPU: keep solver work\_dir on Lustre (\$SLURM\_SCRATCH breaks diag-gpu) \\
+\texttt{4830d6d} & Lint: drop unused Path import, shorten comment \\
+\midrule
+\multicolumn{2}{@{}l}{\emph{Slurm-target GPU (per-solve sbatch) + refs/plot fixes}}\\
+\texttt{a6c13ef} & \textbf{Slurm target GPU support} (\texttt{--gres}, \texttt{srun}/PMIx) \\
+\texttt{4c474ac} & Pass \texttt{srun/--gpu-bind} via env (argparse rejects \texttt{--flag} opts) \\
+\texttt{16d1439} & refs: fix \texttt{mycc.e\_tot()} $\to$ \texttt{e\_tot} \\
+\texttt{3f2d662} & slurm template: \texttt{unset SLURM\_CPUS\_PER\_TASK/TRES} before nested srun \\
+\texttt{c013ac3} & GPU runner: scan all telemetry artifacts for \texttt{recovery\_trace} \\
+\texttt{1dfdbdd} & GPU runner: \texttt{PREFECT\_API\_REQUEST\_TIMEOUT=600} (multi-step httpx fix) \\
+\texttt{ca869dd} & refs: skip HCI above \texttt{HCI\_MAX\_NORB} (hangs at 72q) \\
+\texttt{53fea0b} & RHF sampler: \texttt{PREFECT\_HOME} on Lustre so the pool persists \\
+\midrule
+\multicolumn{2}{@{}l}{\emph{Figures, cleanup, presentation}}\\
+\texttt{00030b5} & plot: molecule-aware output filenames \\
+\texttt{05c192c} & plot: error panel falls back to CCSD(T)/UCCSD when no DMRG \\
+\texttt{aa20e57} & cross-system \%-recovered figure \\
+\texttt{e1e82f3} & Untrack \texttt{algorithms/sbd/sweep/}; gitignore experiment scratch \\
+\texttt{2a7eba9} & docs: Overleaf presentation summary + Fe4S4/Fe2S2 figures \\
+\texttt{448293c} & docs: RHF-vs-UHF Fe4S4 results + runtime \& full hyperparameter tables \\
+\texttt{79434d4} & docs: refresh two-panel (Fe4S4 shows both UHF+RHF curves) \\
+\texttt{0b2d7fc} & docs: Fe2S2 panel now a UHF recovery curve (was single point) \\
+\texttt{a15de7d} & docs: complete Fe2S2 RHF-vs-UHF results + all-four-trajectory figures \\
 \bottomrule
 \end{longtable}
-\emph{(Earlier July commits --- \texttt{12a4232}, \texttt{1a63b31}, \texttt{aac6a3f},
-\texttt{0361bae}, \texttt{b91dde5}, \texttt{b9023b1} --- added the carryover flag, shot-batch
-mitigation guard, single-walker eval, solver wait-timeout knob, and the persisted-sample-pool
-source that the ``sample once, reuse'' workflow depends on.)}
 
 \section{Summary}
 The SQD closed loop now runs natively on ROQUO GB200 GPUs through Prefect's Slurm target, with a
