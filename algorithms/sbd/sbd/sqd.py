@@ -732,6 +732,14 @@ def walker_sqd(
 
         # Feed the batch-averaged occupancies into the next recovery pass (self-consistency).
         avg_occ = (step_occ_a, step_occ_b)
+        # Feed the best batch's carryover determinants forward too. Without this the loop re-uses
+        # the ORIGINAL `carryover` argument every step (empty on a fresh walker), so with
+        # carryover_type>0 the high-weight determinants found in step N are discarded at step N+1
+        # and multi-step self-consistency loses the carryover half of its signal. The UHF split at
+        # the top of the loop (carryover[:, :norb] / [:, norb:]) and the RHF pass-through both accept
+        # this stacked/flat shape, matching what _stack_spin_carryover / the RHF branch produced.
+        if step_carryover is not None:
+            carryover = step_carryover
 
     logger.debug("Completed configuration recovery loop.")
 
