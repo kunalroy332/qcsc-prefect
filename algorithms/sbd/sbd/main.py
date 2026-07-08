@@ -238,6 +238,7 @@ def differential_evolution_trial(
             random_seed=parameters.random_seed,
             n_recovery_steps=parameters.n_recovery_steps,
             n_batches=parameters.n_batches,
+            seed_cisd=parameters.seed_cisd,
         )
         futs.append(prefect_fut)
 

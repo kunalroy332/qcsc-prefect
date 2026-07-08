@@ -153,6 +153,32 @@ class FlowParameters(BaseModel):
         ge=1,
     )
 
+    seed_cisd: int = Field(
+        default=0,
+        description=(
+            "Classically seed the SQD subspace with low-order excitations of the Hartree-Fock "
+            "reference, so those determinants are ALWAYS present regardless of what the (noisy) "
+            "quantum sampler produced. This is the QSCI+SD / SCI-augmentation scheme: sampled "
+            "configurations are augmented with classically-generated single/double excitations to "
+            "restore the low-excitation determinants that hardware noise drops or underweights. "
+            "Levels: 0 = OFF (default, pure quantum-sampled subspace); 1 = SINGLES only; "
+            "2 = DOUBLES only; 3 = SINGLES + DOUBLES. The seed determinants are generated per spin "
+            "channel by exciting electrons from occupied into virtual orbitals, conserving each "
+            "spin's electron count (so the (Na, Nb) sector and hence Sz are preserved exactly), and "
+            "are forced into the subspace alongside the Hartree-Fock and carryover determinants "
+            "(deduplicated). If the seed set is larger than the sqd_dim budget it is capped "
+            "(singles kept first, then as many doubles as fit) so the run always proceeds at the "
+            "requested sqd_dim. Purely classical integer bitstring generation -> identical on CPU "
+            "and GPU, no extra QPU cost. "
+            "References: Enhancing Accuracy of Quantum-Selected Configuration Interaction, "
+            "J. Chem. Theory Comput. (PMC12423809); Molecular Quantum Computations on a Protein, "
+            "arXiv:2512.17130; Auto-regressive NQS Sampling for Selected CI, arXiv:2603.24728."
+        ),
+        title="Seed CISD Level",
+        ge=0,
+        le=3,
+    )
+
     quantum_source: Literal["real-device", "random", "saved"] = Field(
         default="real-device",
         description=(

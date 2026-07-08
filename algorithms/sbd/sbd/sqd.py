@@ -1,6 +1,7 @@
 # Workflow for observability demo on Miyabi
 
 import asyncio
+import itertools
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
@@ -230,6 +231,7 @@ def walker_sqd(
     random_seed: int,
     n_recovery_steps: int = 1,
     n_batches: int = 1,
+    seed_cisd: int = 0,
 ) -> tuple[tuple[float, NpStrict2DArrayBool], dict[str, Any]]:
     logger = get_run_logger()
     davidson_solver = SBDSolverJob.load(solver_block_name)
@@ -577,6 +579,7 @@ def walker_sqd(
                     num_elec_a=num_elec_a,
                     num_elec_b=num_elec_b,
                     rng=walker_rng,
+                    seed_cisd=seed_cisd,
                 )
                 if batch == 0:
                     # [diag] excitation profile of batch 0 (make-or-break: a subspace dominated by
@@ -613,6 +616,7 @@ def walker_sqd(
                     norb=norb,
                     num_elec_a=num_elec_a,
                     rng=walker_rng,
+                    seed_cisd=seed_cisd,
                 )
                 if batch == 0:
                     logger.info("[diag] recovery %d/%d dets: %s", recovery_step + 1,
@@ -769,6 +773,7 @@ def walker_sqd(
         energy=float(best_energy),
         n_recovery_steps=n_recovery_steps,
         n_batches=n_batches,
+        seed_cisd=seed_cisd,
         sqd_data=str(best_report_s3),
         recovery_trace=recovery_trace,
         last_updated=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -816,6 +821,127 @@ def postselect_bitstrings(
     return bs_mat_postsel, probs_postsel
 
 
+_CISD_CACHE: dict[tuple[int, int, int], NpStrict1DArrayLL] = {}
+
+
+def _cisd_strings(norb: int, num_elec: int, level: int) -> NpStrict1DArrayLL:
+    """Classically generate low-order excitation determinants of the Hartree-Fock reference.
+
+    Returns the sorted-unique CI-string integers (EXCLUDING the HF string itself) for one spin
+    channel, to be forced into the SQD subspace regardless of what the noisy quantum sampler
+    produced. This implements the QSCI+SD / SCI-augmentation idea: augment the sampled configuration
+    set with classically-generated single/double excitations so the low-excitation determinants that
+    hardware noise drops or underweights are always present in the diagonalized subspace.
+
+    Encoding matches the subsample routines, which build each CI string as
+    ``sum_i occ[i] * 2**(norb-1-i)`` and set ``hartreefock = (1 << num_elec) - 1``. So the HF
+    reference is exactly the integer with its lowest ``num_elec`` BITS set (bit positions
+    ``0 .. num_elec-1``). We therefore work directly in BIT space: the "occupied" bit positions are
+    ``0 .. num_elec-1`` and the "virtual" bit positions are ``num_elec .. norb-1``. Each excitation
+    clears occupied bits and sets the same number of virtual bits, so the popcount stays exactly
+    ``num_elec`` -> this spin's electron count is conserved, which (done per spin) preserves the
+    (Na, Nb) sector and hence Sz exactly. (This bit-space view is equivalent to exciting electrons
+    from occupied into virtual orbitals; it just avoids the orbital<->bit index flip.)
+
+    Parameters
+    ----------
+    norb:
+        Number of spatial orbitals for this spin channel.
+    num_elec:
+        Number of electrons in this spin channel (HF fills the lowest ``num_elec`` orbitals).
+    level:
+        Which excitations to generate. 0 -> none (empty array); 1 -> singles only;
+        2 -> doubles only; 3 -> singles + doubles. Levels 1/2/3 mirror the ``seed_cisd`` flow
+        parameter.
+
+    Notes
+    -----
+    Counts (per spin): singles = ``num_elec * (norb - num_elec)``;
+    doubles = ``C(num_elec, 2) * C(norb - num_elec, 2)``.
+    Pure integer/bit operations (numpy + itertools) -> identical results on CPU and GPU hosts, no
+    device code and no floating point. Results are cached per (norb, num_elec, level) because the
+    set is constant across recovery steps and K-batches.
+
+    References
+    ----------
+    Enhancing Accuracy of Quantum-Selected Configuration Interaction, J. Chem. Theory Comput.
+    (PMC12423809); Molecular Quantum Computations on a Protein, arXiv:2512.17130; Auto-regressive
+    Neural Quantum State Sampling for Selected Configuration Interaction, arXiv:2603.24728.
+    """
+    if level <= 0:
+        return np.empty(0, dtype=np.longlong)
+    key = (int(norb), int(num_elec), int(level))
+    cached = _CISD_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    hf = (1 << num_elec) - 1        # HF: lowest num_elec BITS set (bits 0 .. num_elec-1)
+    occ = list(range(num_elec))     # occupied bit positions in HF
+    virt = list(range(num_elec, norb))  # virtual (empty) bit positions in HF
+    out: list[int] = []
+
+    if level in (1, 3):  # singles: clear one occupied bit, set one virtual bit
+        for i in occ:
+            base = hf & ~(1 << i)
+            for a in virt:
+                out.append(base | (1 << a))
+    if level in (2, 3):  # doubles: clear two occupied bits, set two virtual bits
+        for i, j in itertools.combinations(occ, 2):
+            base = hf & ~(1 << i) & ~(1 << j)
+            for a, b in itertools.combinations(virt, 2):
+                out.append(base | (1 << a) | (1 << b))
+
+    arr = np.array(sorted(set(out)), dtype=np.longlong) if out else np.empty(0, dtype=np.longlong)
+    arr = arr[arr != hf]  # HF is forced at index 0 by the caller; never duplicate it
+    _CISD_CACHE[key] = arr
+    return arr
+
+
+def _merge_with_seed(
+    hartreefock: int,
+    ci_strs_carryover: NpStrict1DArrayLL,
+    seed_strings: NpStrict1DArrayLL,
+    subspace_dim: int,
+    norb: int,
+    num_elec: int,
+    seed_cisd: int,
+    new_strings_fn,
+    logger=None,
+) -> NpStrict1DArrayLL:
+    """Assemble the final per-spin CI list ``[HF, carryover, seed, sampled]`` with seed capping.
+
+    The forced determinants (HF + carryover + CISD seed) take priority within the subspace budget
+    ``floor(sqrt(subspace_dim))``. If the CISD seed does not fit, it is capped so the run always
+    proceeds at the requested ``subspace_dim`` (the seed array is ordered singles-first by
+    ``_cisd_strings``' sort only loosely, so we keep a deterministic prefix; singles have smaller
+    integer values than most doubles because they disturb fewer high bits, but to be explicit the
+    caller passes ``seed_strings`` already in the desired priority order). ``new_strings_fn(budget)``
+    returns up to ``budget`` random sampled determinants (dedup vs HF/carryover/seed handled there).
+    """
+    seed_strings = np.asarray(seed_strings, dtype=np.longlong)
+    # Dedup seed against carryover and HF so slots are not double-counted.
+    if seed_strings.size:
+        drop = np.isin(seed_strings, ci_strs_carryover) | (seed_strings == hartreefock)
+        seed_strings = seed_strings[~drop]
+
+    total_budget = int(np.sqrt(subspace_dim)) - len(ci_strs_carryover) - 1  # slots after HF+carryover
+    total_budget = max(total_budget, 0)
+
+    n_seed_forced = min(len(seed_strings), total_budget)
+    seed_kept = seed_strings[:n_seed_forced]
+    remaining = total_budget - n_seed_forced
+    new_strings = new_strings_fn(remaining) if remaining > 0 else np.empty(0, dtype=np.longlong)
+
+    if logger is not None and seed_cisd:
+        logger.info(
+            "[diag] seed CISD level=%d: forced %d/%d seed dets/spin (budget=%d, sampled=%d)",
+            seed_cisd, n_seed_forced, len(seed_strings), total_budget, len(new_strings),
+        )
+    return np.concatenate(
+        ([hartreefock], ci_strs_carryover, seed_kept, new_strings), dtype=np.longlong
+    )
+
+
 @task
 def subsample_close_shell(
     bitstring_matrix: NpStrict2DArrayBool,
@@ -825,6 +951,7 @@ def subsample_close_shell(
     norb: int,
     num_elec_a: int,
     rng: np.random.Generator | None = None,
+    seed_cisd: int = 0,
 ) -> NpStrict1DArrayLL:
     # Use an explicit per-walker Generator when provided so concurrent walkers draw INDEPENDENT
     # subspaces (and there is no thread race on a shared global). Falls back to MODULE_RNG only for
@@ -866,25 +993,30 @@ def subsample_close_shell(
     non_hf_mask = ci_strs_unique != hartreefock
     ci_strs_carryover = ci_strs_carryover[ci_strs_carryover != hartreefock]
 
-    num_new_samples = int(np.sqrt(subspace_dim)) - len(ci_strs_carryover) - 1
-    if len(ci_strs_unique) > num_new_samples:
-        # Choose bitstrings not included in carryover bitstrings
-        # Subspace dimension must be preserved
-        non_co_mask = ~np.isin(ci_strs_unique, ci_strs_carryover)
-        mask = non_hf_mask & non_co_mask
-        ci_strs_unique = ci_strs_unique[mask]
-        ci_probs_unique = ci_probs_unique[mask]
-        new_strings = rng.choice(
-            ci_strs_unique,
-            size=num_new_samples,
-            replace=False,
-            p=ci_probs_unique / ci_probs_unique.sum(),
-        )
-    else:
-        new_strings = ci_strs_unique[non_hf_mask]
+    # Classically-seeded low-excitation determinants (QSCI+SD); empty when seed_cisd == 0.
+    seed_strings = _cisd_strings(norb, num_elec_a, seed_cisd)
 
-    # Carryover bitstrings are always included
-    return np.concatenate(([hartreefock], ci_strs_carryover, new_strings), dtype=np.longlong)
+    def _draw_new(budget: int) -> NpStrict1DArrayLL:
+        # Choose sampled bitstrings not already in carryover or the seed. Subspace dim preserved.
+        forced = np.concatenate((ci_strs_carryover, seed_strings)) if seed_strings.size else ci_strs_carryover
+        non_co_mask = ~np.isin(ci_strs_unique, forced)
+        mask = non_hf_mask & non_co_mask
+        cands = ci_strs_unique[mask]
+        probs = ci_probs_unique[mask]
+        if len(cands) > budget:
+            return rng.choice(cands, size=budget, replace=False, p=probs / probs.sum())
+        return cands
+
+    return _merge_with_seed(
+        hartreefock=hartreefock,
+        ci_strs_carryover=ci_strs_carryover,
+        seed_strings=seed_strings,
+        subspace_dim=subspace_dim,
+        norb=norb,
+        num_elec=num_elec_a,
+        seed_cisd=seed_cisd,
+        new_strings_fn=_draw_new,
+    )
 
 
 @task
@@ -898,6 +1030,7 @@ def subsample_open_shell(
     num_elec_a: int,
     num_elec_b: int,
     rng: np.random.Generator | None = None,
+    seed_cisd: int = 0,
 ) -> tuple[NpStrict1DArrayLL, NpStrict1DArrayLL]:
     """Build separate alpha and beta CI string lists from bitstrings (open-shell / UHF).
 
@@ -929,6 +1062,7 @@ def subsample_open_shell(
         norb=norb,
         num_elec=num_elec_a,
         rng=rng,
+        seed_cisd=seed_cisd,
     )
     ci_b = _subsample_one_spin(
         ci_strs=ci_strs_b,
@@ -938,6 +1072,7 @@ def subsample_open_shell(
         norb=norb,
         num_elec=num_elec_b,
         rng=rng,
+        seed_cisd=seed_cisd,
     )
     return ci_a, ci_b
 
@@ -950,6 +1085,7 @@ def _subsample_one_spin(
     norb: int,
     num_elec: int,
     rng: np.random.Generator | None = None,
+    seed_cisd: int = 0,
 ) -> NpStrict1DArrayLL:
     """Dedup + carryover + HF-at-index-0 for a single spin channel.
 
@@ -977,24 +1113,30 @@ def _subsample_one_spin(
     non_hf_mask = ci_strs_unique != hartreefock
     ci_strs_carryover = ci_strs_carryover[ci_strs_carryover != hartreefock]
 
-    num_new_samples = int(np.sqrt(subspace_dim)) - len(ci_strs_carryover) - 1
-    if len(ci_strs_unique) > num_new_samples:
-        # Choose bitstrings not included in carryover bitstrings; preserve subspace dimension.
-        non_co_mask = ~np.isin(ci_strs_unique, ci_strs_carryover)
-        mask = non_hf_mask & non_co_mask
-        ci_strs_unique = ci_strs_unique[mask]
-        ci_probs_unique = ci_probs_unique[mask]
-        new_strings = rng.choice(
-            ci_strs_unique,
-            size=num_new_samples,
-            replace=False,
-            p=ci_probs_unique / ci_probs_unique.sum(),
-        )
-    else:
-        new_strings = ci_strs_unique[non_hf_mask]
+    # Classically-seeded low-excitation determinants for this spin (QSCI+SD); empty if seed_cisd==0.
+    seed_strings = _cisd_strings(norb, num_elec, seed_cisd)
 
-    # Carryover bitstrings are always included; HF is forced to index 0.
-    return np.concatenate(([hartreefock], ci_strs_carryover, new_strings), dtype=np.longlong)
+    def _draw_new(budget: int) -> NpStrict1DArrayLL:
+        forced = np.concatenate((ci_strs_carryover, seed_strings)) if seed_strings.size else ci_strs_carryover
+        non_co_mask = ~np.isin(ci_strs_unique, forced)
+        mask = non_hf_mask & non_co_mask
+        cands = ci_strs_unique[mask]
+        probs = ci_probs_unique[mask]
+        if len(cands) > budget:
+            return rng.choice(cands, size=budget, replace=False, p=probs / probs.sum())
+        return cands
+
+    # Carryover + CISD seed are always included; HF is forced to index 0.
+    return _merge_with_seed(
+        hartreefock=hartreefock,
+        ci_strs_carryover=ci_strs_carryover,
+        seed_strings=seed_strings,
+        subspace_dim=subspace_dim,
+        norb=norb,
+        num_elec=num_elec,
+        seed_cisd=seed_cisd,
+        new_strings_fn=_draw_new,
+    )
 
 
 def _deduplicate_and_accumurate_probs(
