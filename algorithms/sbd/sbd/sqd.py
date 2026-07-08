@@ -480,6 +480,11 @@ def walker_sqd(
     # density, useful-det fraction, occupancies) would be unrecoverable except by log-scraping.
     # Purely diagnostic; appended once per pass and never read back inside the loop.
     recovery_trace: list[dict] = []
+    # Previous step's carryover set (as a set of row-bytes) for the carryover-acquisition metric
+    # |chi_co,g \ chi_co,g-1| -- the number of NEW carryover determinants introduced at step g
+    # (arXiv:2405.05068 / the observability study arXiv:2512.05484 Fig. 4b). A decreasing trend
+    # means the high-weight determinants are found early and then persist -> carryover working.
+    prev_carryover_keys: set[bytes] | None = None
 
     # One-time diagnostics on the raw quantum samples (before any recovery).
     logger.info(
@@ -718,6 +723,21 @@ def walker_sqd(
         # into the diagonalized CI matrix (a subspace-quality proxy, see qcsc-bigdim memory). All
         # quantities are already computed above; this is a cheap dict append.
         _be = np.asarray(batch_energies, dtype=np.float64) if batch_energies else np.empty(0)
+
+        # Carryover-acquisition metric |chi_co,g \ chi_co,g-1|: how many carryover determinants at
+        # this step are NEW vs the previous step's carryover set. Each carryover row is a boolean
+        # occupation vector; hash by its raw bytes to build sets. carryover_total = |chi_co,g|.
+        if step_carryover is not None and len(step_carryover):
+            cur_keys = {np.asarray(row, dtype=bool).tobytes() for row in step_carryover}
+        else:
+            cur_keys = set()
+        carryover_total = len(cur_keys)
+        if prev_carryover_keys is None:
+            carryover_acquisition = carryover_total  # step 0: all carryover is "new"
+        else:
+            carryover_acquisition = len(cur_keys - prev_carryover_keys)
+        prev_carryover_keys = cur_keys
+
         recovery_trace.append(
             {
                 "step": int(recovery_step),
@@ -729,9 +749,15 @@ def walker_sqd(
                 "batch_min": float(_be.min()) if _be.size else float(energy),
                 "batch_mean": float(_be.mean()) if _be.size else float(energy),
                 "batch_std": float(_be.std()) if _be.size else 0.0,
+                "carryover_total": int(carryover_total),
+                "carryover_acquisition": int(carryover_acquisition),
                 "occ_a": step_occ_a.tolist(),
                 "occ_b": step_occ_b.tolist(),
             }
+        )
+        logger.info(
+            "[diag] recovery %d/%d carryover: total=%d acquisition(new vs prev)=%d",
+            recovery_step + 1, n_recovery_steps, carryover_total, carryover_acquisition,
         )
 
         # Feed the batch-averaged occupancies into the next recovery pass (self-consistency).
@@ -819,6 +845,14 @@ def postselect_bitstrings(
     probs_postsel = np.abs(probs_postsel) / np.sum(np.abs(probs_postsel))
 
     return bs_mat_postsel, probs_postsel
+
+
+def _safe_run_logger():
+    """Prefect run logger when inside a task/flow context, else None (e.g. unit tests)."""
+    try:
+        return get_run_logger()
+    except Exception:
+        return None
 
 
 _CISD_CACHE: dict[tuple[int, int, int], NpStrict1DArrayLL] = {}
@@ -1016,6 +1050,7 @@ def subsample_close_shell(
         num_elec=num_elec_a,
         seed_cisd=seed_cisd,
         new_strings_fn=_draw_new,
+        logger=_safe_run_logger(),
     )
 
 
@@ -1136,6 +1171,7 @@ def _subsample_one_spin(
         num_elec=num_elec,
         seed_cisd=seed_cisd,
         new_strings_fn=_draw_new,
+        logger=_safe_run_logger(),
     )
 
 
