@@ -232,6 +232,7 @@ def walker_sqd(
     n_recovery_steps: int = 1,
     n_batches: int = 1,
     seed_cisd: int = 0,
+    seed_budget_frac: float = 1.0,
 ) -> tuple[tuple[float, NpStrict2DArrayBool], dict[str, Any]]:
     logger = get_run_logger()
     davidson_solver = SBDSolverJob.load(solver_block_name)
@@ -585,6 +586,7 @@ def walker_sqd(
                     num_elec_b=num_elec_b,
                     rng=walker_rng,
                     seed_cisd=seed_cisd,
+                    seed_budget_frac=seed_budget_frac,
                 )
                 if batch == 0:
                     # [diag] excitation profile of batch 0 (make-or-break: a subspace dominated by
@@ -622,6 +624,7 @@ def walker_sqd(
                     num_elec_a=num_elec_a,
                     rng=walker_rng,
                     seed_cisd=seed_cisd,
+                    seed_budget_frac=seed_budget_frac,
                 )
                 if batch == 0:
                     logger.info("[diag] recovery %d/%d dets: %s", recovery_step + 1,
@@ -941,16 +944,22 @@ def _merge_with_seed(
     seed_cisd: int,
     new_strings_fn,
     logger=None,
+    seed_budget_frac: float = 1.0,
 ) -> NpStrict1DArrayLL:
     """Assemble the final per-spin CI list ``[HF, carryover, seed, sampled]`` with seed capping.
 
     The forced determinants (HF + carryover + CISD seed) take priority within the subspace budget
     ``floor(sqrt(subspace_dim))``. If the CISD seed does not fit, it is capped so the run always
-    proceeds at the requested ``subspace_dim`` (the seed array is ordered singles-first by
-    ``_cisd_strings``' sort only loosely, so we keep a deterministic prefix; singles have smaller
-    integer values than most doubles because they disturb fewer high bits, but to be explicit the
-    caller passes ``seed_strings`` already in the desired priority order). ``new_strings_fn(budget)``
-    returns up to ``budget`` random sampled determinants (dedup vs HF/carryover/seed handled there).
+    proceeds at the requested ``subspace_dim``. ``new_strings_fn(budget)`` returns up to ``budget``
+    sampled determinants (dedup vs HF/carryover/seed handled there); because the seed is excluded
+    there, those sampled dets are exactly the ones NOT in the CISD manifold -- i.e. the
+    higher-excitation configs the device sampled.
+
+    ``seed_budget_frac`` (0 < f <= 1) caps the CISD seed to at most ``f * total_budget`` slots,
+    reserving the rest of the subspace for sampled higher-excitation determinants. f=1.0 (default)
+    forces as much seed as fits (original behavior); f<1.0 enables "partial-CISD + heavy mixing":
+    e.g. f=0.5 fills half the budget with CISD S+D and the other half with the sample's best
+    higher-excitation dets, which is what can beat the pure-CISD (S+D-only) energy ceiling.
     """
     seed_strings = np.asarray(seed_strings, dtype=np.longlong)
     # Dedup seed against carryover and HF so slots are not double-counted.
@@ -961,15 +970,19 @@ def _merge_with_seed(
     total_budget = int(np.sqrt(subspace_dim)) - len(ci_strs_carryover) - 1  # slots after HF+carryover
     total_budget = max(total_budget, 0)
 
-    n_seed_forced = min(len(seed_strings), total_budget)
+    # Cap the seed to a fraction of the budget so sampled higher-excitation dets get the rest.
+    frac = min(max(seed_budget_frac, 0.0), 1.0)
+    seed_cap = int(total_budget * frac) if frac < 1.0 else total_budget
+    n_seed_forced = min(len(seed_strings), seed_cap)
     seed_kept = seed_strings[:n_seed_forced]
     remaining = total_budget - n_seed_forced
     new_strings = new_strings_fn(remaining) if remaining > 0 else np.empty(0, dtype=np.longlong)
 
     if logger is not None and seed_cisd:
         logger.info(
-            "[diag] seed CISD level=%d: forced %d/%d seed dets/spin (budget=%d, sampled=%d)",
-            seed_cisd, n_seed_forced, len(seed_strings), total_budget, len(new_strings),
+            "[diag] seed CISD level=%d frac=%.2f: forced %d/%d seed dets/spin "
+            "(budget=%d, sampled_higher=%d)",
+            seed_cisd, frac, n_seed_forced, len(seed_strings), total_budget, len(new_strings),
         )
     return np.concatenate(
         ([hartreefock], ci_strs_carryover, seed_kept, new_strings), dtype=np.longlong
@@ -986,6 +999,7 @@ def subsample_close_shell(
     num_elec_a: int,
     rng: np.random.Generator | None = None,
     seed_cisd: int = 0,
+    seed_budget_frac: float = 1.0,
 ) -> NpStrict1DArrayLL:
     # Use an explicit per-walker Generator when provided so concurrent walkers draw INDEPENDENT
     # subspaces (and there is no thread race on a shared global). Falls back to MODULE_RNG only for
@@ -1051,6 +1065,7 @@ def subsample_close_shell(
         seed_cisd=seed_cisd,
         new_strings_fn=_draw_new,
         logger=_safe_run_logger(),
+        seed_budget_frac=seed_budget_frac,
     )
 
 
@@ -1066,6 +1081,7 @@ def subsample_open_shell(
     num_elec_b: int,
     rng: np.random.Generator | None = None,
     seed_cisd: int = 0,
+    seed_budget_frac: float = 1.0,
 ) -> tuple[NpStrict1DArrayLL, NpStrict1DArrayLL]:
     """Build separate alpha and beta CI string lists from bitstrings (open-shell / UHF).
 
@@ -1098,6 +1114,7 @@ def subsample_open_shell(
         num_elec=num_elec_a,
         rng=rng,
         seed_cisd=seed_cisd,
+        seed_budget_frac=seed_budget_frac,
     )
     ci_b = _subsample_one_spin(
         ci_strs=ci_strs_b,
@@ -1108,6 +1125,7 @@ def subsample_open_shell(
         num_elec=num_elec_b,
         rng=rng,
         seed_cisd=seed_cisd,
+        seed_budget_frac=seed_budget_frac,
     )
     return ci_a, ci_b
 
@@ -1121,6 +1139,7 @@ def _subsample_one_spin(
     num_elec: int,
     rng: np.random.Generator | None = None,
     seed_cisd: int = 0,
+    seed_budget_frac: float = 1.0,
 ) -> NpStrict1DArrayLL:
     """Dedup + carryover + HF-at-index-0 for a single spin channel.
 
@@ -1172,6 +1191,7 @@ def _subsample_one_spin(
         seed_cisd=seed_cisd,
         new_strings_fn=_draw_new,
         logger=_safe_run_logger(),
+        seed_budget_frac=seed_budget_frac,
     )
 
 

@@ -179,6 +179,22 @@ class FlowParameters(BaseModel):
         le=3,
     )
 
+    seed_budget_frac: float = Field(
+        default=1.0,
+        description=(
+            "Fraction (0 < f <= 1) of the per-spin subspace budget the CISD seed may occupy when "
+            "seed_cisd > 0. f=1.0 (default) forces as much of the singles/doubles manifold as fits. "
+            "f<1.0 caps the seed to f*budget and reserves the remaining slots for the sample's "
+            "higher-excitation determinants (triples and above) -- 'partial-CISD + heavy mixing'. "
+            "Because pure singles+doubles has a fixed energy ceiling (~CISD), admitting sampled "
+            "higher excitations on top is what can push the energy below that ceiling toward "
+            "CCSD(T)/DMRG. Ignored when seed_cisd == 0."
+        ),
+        title="Seed CISD Budget Fraction",
+        gt=0.0,
+        le=1.0,
+    )
+
     quantum_source: Literal["real-device", "random", "saved"] = Field(
         default="real-device",
         description=(
