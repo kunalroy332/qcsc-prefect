@@ -223,21 +223,124 @@ recovery curve vs its references. Each panel has its own energy axis (the system
 $\sim$210\,Ha). \emph{[Figure: \texttt{fe\_twopanel.png}]}}
 \end{figure}
 
-\subsection{RHF case}
-\textbf{[PLACEHOLDER --- RHF run in progress.]} The RHF pipeline is identical to UHF with
-\texttt{--method rhf} (RHF reference, restricted diagonalizer \texttt{diag-gpu}). RHF was sampled
-on \texttt{ibm\_kobe} (5\,M shots; $E_{\text{sample}}=-326.547$ Ha) and the pool persisted; the
-5-iteration GPU recovery is running. On completion, the RHF recovery curve will be overlaid on the
-Fe$_4$S$_4$ panel for a direct RHF-vs-UHF comparison of the recovery effect. \emph{Fe$_2$S$_2$
-RHF (and a clean Fe$_2$S$_2$ UHF) recovery are queued for ROQUO as time permits (small/fast at
-40q).}
+\subsection{Fe$_4$S$_4$ (72q): RHF vs UHF recovery}
+The RHF pipeline is identical to UHF with \texttt{--method rhf} (RHF reference, restricted
+diagonalizer). RHF was sampled independently on \texttt{ibm\_kobe} (5\,M shots) and its
+5-iteration GPU recovery converges to $-326.632$ Ha --- notably \emph{below} the UHF-SQD result
+($-326.519$), i.e.\ on this active space the restricted reference yields a slightly deeper
+recovered energy. Both curves lie well below UHF, between UHF and UCCSD relative to CCSD(T).
+
+\begin{table}[h]\centering
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+Ref & it.1 & it.2 & it.3 & it.4 & it.5 & best \\
+\midrule
+UHF-SQD & $-326.197$ & $-326.497$ & $-326.519$ & $-326.509$ & $-326.514$ & $\mathbf{-326.519}$ \\
+RHF-SQD & $-326.595$ & $-326.608$ & $-326.632$ & $-326.613$ & $-326.611$ & $\mathbf{-326.632}$ \\
+\bottomrule
+\end{tabular}
+\caption{Fe$_4$S$_4$ (72q) RHF vs UHF SQD recovery trajectories (Ha; sqd\_dim $=3\times10^8$,
+GB200 GPU). References: UHF $-325.9987$, UCCSD $-326.8678$, CCSD(T) $-327.1762$ Ha.}
+\end{table}
 
 \begin{figure}[h]\centering
-\fbox{\parbox[c][4cm][c]{0.8\textwidth}{\centering\emph{Placeholder: Fe$_4$S$_4$ RHF-vs-UHF
-recovery curves (\texttt{fe4s4\_rhf\_vs\_uhf.png}) --- to be inserted when the RHF recovery
-job completes.}}}
-\caption{RHF vs UHF recovery on Fe$_4$S$_4$ (72q). \emph{[Placeholder]}}
+\includegraphics[width=0.9\textwidth]{fe4s4_rhf_vs_uhf.png}
+\caption{\textbf{Fe$_4$S$_4$ (72q): RHF vs UHF SQD recovery} on GB200 GPU. Blue = UHF-SQD,
+orange = RHF-SQD; both converge within $\sim$3 iterations, well below the UHF reference and
+toward UCCSD/CCSD(T). \emph{[Figure: \texttt{fe4s4\_rhf\_vs\_uhf.png}]}}
 \end{figure}
+
+\emph{Fe$_2$S$_2$ (40q): a clean UHF sample + 5-iteration recovery is running on ROQUO; RHF to
+follow. The two-panel figure (\S 5.2) will be upgraded to show the Fe$_2$S$_2$ recovery trajectory
+in place of the single point.}
+
+% =====================================================================================
+\section{Runtime summary and full hyperparameters}
+% =====================================================================================
+\subsection{Wall-clock (ROQUO, per job)}
+All GPU jobs used the qtr node plan (1$\times$GB200, 36 cores). Sampling is dominated by the
+IBM device queue + 5\,M-shot execution; recovery by the recover/subsample step and the GPU solve.
+\begin{longtable}{@{}llrl@{}}
+\toprule
+Stage & System / method & Wall-clock & Notes \\
+\midrule\endhead
+Sampling (kobe, 5\,M shots) & Fe$_4$S$_4$ UHF & 41\,min & 1{,}312{,}655 kept shots \\
+Sampling (kobe, 5\,M shots) & Fe$_4$S$_4$ RHF & 42\,min & $E_{\text{sample}}=-326.547$ \\
+Sampling (kobe, 5\,M shots) & Fe$_2$S$_2$ UHF & 44\,min & $E_{\text{sample}}=-116.277$ \\
+Recovery (5 iter, GB200)    & Fe$_4$S$_4$ UHF & 36\,min & $\sim$65--400\,s/solve, sqd\_dim $3\times10^8$ \\
+Recovery (5 iter, GB200)    & Fe$_4$S$_4$ RHF & 27\,min & 1608\,s total flow \\
+Single GPU solve (17{,}320 dets/spin) & Fe$_4$S$_4$ & 13--65\,s & Davidson $\sim$13--24\,s + FCIDUMP parse/GPU init \\
+References (UHF/UCCSD/CCSD(T)) & Fe$_4$S$_4$ (36o) & $\sim$30\,min & CCSD(T) triples dominate \\
+References (UHF/UCCSD/CCSD(T)) & Fe$_2$S$_2$ (20o) & $\sim$5\,min & \\
+GPU build (nvc++, both binaries) & --- & $\sim$8\,min & one-time, on a compute node \\
+\bottomrule
+\end{longtable}
+
+\subsection{Complete hyperparameter set}
+Identical for UHF and RHF except \texttt{--method} (and hence the reference, LUCJ ansatz, and diag
+binary). Fe$_2$S$_2$ uses the same values except \texttt{sqd\_dim} (see note).
+\begin{longtable}{@{}lll@{}}
+\toprule
+Parameter & Value & Meaning \\
+\midrule\endhead
+\multicolumn{3}{@{}l}{\emph{Active space / problem}}\\
+\ \ Fe$_4$S$_4$ & NORB=36, NELEC=54, MS2=0 & 72 qubits, singlet \\
+\ \ Fe$_2$S$_2$ & NORB=20, NELEC=30, MS2=0 & 40 qubits, singlet \\
+\ \ \texttt{method} & \texttt{uhf} $|$ \texttt{rhf} & reference determinant / diagonalizer \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{Quantum sampling (IBM \texttt{ibm\_kobe})}}\\
+\ \ \texttt{shots} & 5{,}000{,}000 & total measurement shots \\
+\ \ \texttt{n\_shot\_batches} & 5 & $5\times10^6$ split into 5$\times$1\,M (\texttt{concatenate\_shots}) \\
+\ \ \texttt{quantum\_source} & \texttt{real-device} $\to$ \texttt{saved} & sample once, reuse the pool \\
+\ \ dynamical decoupling & on, sequence \texttt{XY4} & error mitigation \\
+\ \ measurement twirling & on & error mitigation \\
+\ \ gate twirling & off & (fails on fractional LUCJ \texttt{rzz}) \\
+\ \ reset mitigation & on & \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{LUCJ circuit (ansatz)}}\\
+\ \ \texttt{n\_lucj\_layers} & 1 & reduces noise at high qubit count \\
+\ \ ansatz seed & (U)CCSD amplitudes & \texttt{SEED\_CCSD\_MAX\_CYCLE=200} + DIIS \\
+\ \ transpiler opt.\ level & 3 & SABRE layout (1024 trials, 8 iters, 10 swap trials) \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{Configuration recovery / SQD}}\\
+\ \ \texttt{sqd\_dim} & $3\times10^8$ (Fe$_4$S$_4$); $3\times10^6$ (Fe$_2$S$_2$) & subspace dim ($\sqrt{}\!\approx$17320 / 1732 dets/spin) \\
+\ \ \texttt{n\_recovery\_steps} & 5 & self-consistent configuration-recovery passes \\
+\ \ \texttt{n\_batches} & 1 & K-batch count (1: concurrent GPU solves OOM) \\
+\ \ \texttt{carryover\_type} & 1 & determinant carryover enabled \\
+\ \ \texttt{carryover\_ratio} & 0.5 & \\
+\ \ Hamming post-selection & $(N_\alpha,N_\beta)$ sector & fixes particle number / $S_z$ \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{Differential evolution (single-pass eval)}}\\
+\ \ \texttt{num\_walkers} & 1 & single evaluation pass \\
+\ \ \texttt{iterations} & 1 & no DE optimization loop \\
+\ \ \texttt{randomization\_factor} & 0.2 & ansatz perturbation from CCSD \\
+\ \ \texttt{fxc} & 0.5 & DE scaling factor (unused at 1 walker) \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{ROQUO GPU execution}}\\
+\ \ \texttt{hpc\_target} & \texttt{slurm} & per-solve \texttt{sbatch} + \texttt{sacct} poll \\
+\ \ \texttt{solver\_mode} & \texttt{gpu} & selects \texttt{diag-gpu}/\texttt{diag-gpu\_uhf} \\
+\ \ \texttt{--slurm-gres} & \texttt{gpu:1} & one GB200 per solve (multi-rank OOMs) \\
+\ \ launcher / MPI opts & \texttt{srun} / \texttt{--gpu-bind=closest} & PMIx, 1 rank/GPU \\
+\ \ modules & \texttt{cuda/13.2}, \texttt{hpcx/2.50} & \\
+\ \ \texttt{ompthreads} & 36 & qtr-plan host cores \\
+\ \ \texttt{solver\_timeout\_seconds} & 43{,}200 & 12\,h \\
+\ \ \texttt{walltime} & 3--4\,h & \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{Classical references}}\\
+\ \ SCF / CCSD \texttt{max\_cycle} & 300 & + DIIS(12) + level-shift(0.2) for hard Fe--S \\
+\ \ HCI & skipped ($>$24 orbitals) & selected-CI intractable at 72q \\
+\ \ DMRG & deferred (block2) & near-exact anchor, separate job \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{GPU build}}\\
+\ \ compiler & \texttt{nvc++} 26.5 & \texttt{-std=c++17 -mp -cuda -fast -gpu=mem:unified,cc100 -DSBD\_THRUST} \\
+\ \ arch & \texttt{cc100} (sm\_100) & GB200 Blackwell \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{Prefect robustness (ROQUO)}}\\
+\ \ \texttt{PREFECT\_API\_REQUEST\_TIMEOUT} & 600\,s & long child-solve polls exceed 60\,s default \\
+\ \ \texttt{PREFECT\_HOME} & Lustre (\texttt{/home}) & pool + DB persistence \\
+\ \ task runner / telemetry & Concurrent / disabled & avoid SQLite contention \\
+\bottomrule
+\end{longtable}
 
 % =====================================================================================
 \section{Commit history (since 2026-07-01)}
