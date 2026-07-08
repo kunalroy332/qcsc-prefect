@@ -258,33 +258,50 @@ orange = RHF-SQD; both converge within $\sim$3 iterations, well below the UHF re
 toward UCCSD/CCSD(T). \emph{[Figure: \texttt{fe4s4\_rhf\_vs\_uhf.png}]}}
 \end{figure}
 
-\subsection{Fe$_2$S$_2$ (40q): RHF vs UHF recovery}
+\subsection{Fe$_2$S$_2$ (40q): RHF vs UHF recovery, DMRG-anchored}
 The same pipeline was run cleanly end-to-end on the smaller Fe$_2$S$_2$ active space (40 qubits,
 30e/20o) on ROQUO GB200 GPU, with independent 5\,M-shot \texttt{ibm\_kobe} samples for each
-reference and \texttt{sqd\_dim}$=3\times10^6$ ($\sqrt{}\!\approx1732$ dets/spin, ample at 40q).
-Both references converge quickly. As on Fe$_4$S$_4$, \textbf{RHF-SQD recovers deeper than
-UHF-SQD}; on Fe$_2$S$_2$ the RHF trajectory even dips \emph{below} the UCCSD line toward CCSD(T),
-i.e.\ it captures more than the coupled-cluster singles-doubles correlation at this size.
+reference and \texttt{sqd\_dim}$=3\times10^6$. We additionally computed a near-exact \textbf{DMRG}
+reference (block2, bond dim $M$ up to 400+, $E_{\text{DMRG}}\approx-116.595$\,Ha).
+
+\paragraph{Key finding --- coupled cluster is unreliable here.} Fe--S clusters are strongly
+multireference, and it shows: CCSD(T) ($-116.375$) sits \textbf{$\sim$220\,mHa above the DMRG
+ground state}, recovering only $\sim$52\,\% of the UHF$\to$DMRG correlation. So ``beating UCCSD''
+is a weak statement --- CC itself is far from exact on this system. \textbf{DMRG is the only
+trustworthy reference}, and all methods (SQD and CC alike) are benchmarked against it.
+
+Against DMRG, both SQD results are variationally sound (safely above it) and \textbf{RHF-SQD
+recovers as much correlation as CCSD(T)}: RHF-SQD captures $\sim$49\,\% of the UHF$\to$DMRG gap
+($+234$\,mHa above DMRG) vs.\ CCSD(T)'s 52\,\% ($+220$\,mHa); UHF-SQD captures $\sim$30\,\%
+($+324$\,mHa). RHF $>$ UHF is consistent with Fe$_4$S$_4$, but the honest picture is that a large
+static-correlation gap remains beyond all of these methods at this subspace size.
 
 \begin{table}[h]\centering
-\begin{tabular}{@{}lrrrrrr@{}}
+\begin{tabular}{@{}lrr@{}}
 \toprule
-Ref & it.1 & it.2 & it.3 & it.4 & it.5 & best \\
+Method & $E$ (Ha) & \% of UHF$\to$DMRG correlation \\
 \midrule
-UHF-SQD & $-116.266$ & $-116.270$ & $-116.258$ & $-116.271$ & $-116.267$ & $\mathbf{-116.271}$ \\
-RHF-SQD & $-116.345$ & $-116.361$ & $-116.348$ & $-116.321$ & $-116.351$ & $\mathbf{-116.361}$ \\
+UHF (reference) & $-116.135$ & 0\,\% \\
+UHF-SQD (best)  & $-116.271$ & 30\,\% \\
+UCCSD           & $-116.337$ & 44\,\% \\
+RHF-SQD (best)  & $-116.361$ & 49\,\% \\
+CCSD(T)         & $-116.375$ & 52\,\% \\
+\textbf{DMRG (near-exact)} & $\mathbf{-116.595}$ & \textbf{100\,\%} \\
 \bottomrule
 \end{tabular}
-\caption{Fe$_2$S$_2$ (40q) RHF vs UHF SQD recovery trajectories (Ha; sqd\_dim $=3\times10^6$,
-GB200 GPU). References: UHF $-116.135$, UCCSD $-116.337$, CCSD(T) $-116.375$ Ha.}
+\caption{Fe$_2$S$_2$ (40q): SQD (best over 5 recovery iterations, sqd\_dim $=3\times10^6$, GB200
+GPU) vs classical references, anchored to DMRG. RHF-SQD $\approx$ CCSD(T) quality; CC is far from
+exact (multireference). UHF-SQD trajectory: $-116.266,-116.270,-116.258,-116.271,-116.267$;
+RHF-SQD: $-116.345,-116.361,-116.348,-116.321,-116.351$.}
 \end{table}
 
 \begin{figure}[h]\centering
 \includegraphics[width=0.9\textwidth]{fe2s2_energy_vs_iter.png}
 \caption{\textbf{Fe$_2$S$_2$ (40q): RHF vs UHF SQD recovery} on GB200 GPU. Blue = UHF-SQD,
-orange = RHF-SQD; dashed/dotted lines are the UHF, UCCSD, CCSD(T) references. Both curves lie
-well below UHF; the RHF-SQD curve reaches below UCCSD, closest to CCSD(T).
-\emph{[Figure: \texttt{fe2s2\_energy\_vs\_iter.png}]}}
+orange = RHF-SQD; horizontal lines are UHF (top), UCCSD, CCSD(T), and the near-exact DMRG anchor
+(bottom, solid). The large DMRG--CCSD(T) gap exposes the coupled-cluster breakdown; RHF-SQD reaches
+CCSD(T)-level correlation, UHF-SQD less, and substantial static correlation remains below all
+curves. \emph{[Figure: \texttt{fe2s2\_energy\_vs\_iter.png}]}}
 \end{figure}
 
 % =====================================================================================
@@ -456,10 +473,17 @@ The SQD closed loop now runs natively on ROQUO GB200 GPUs through Prefect's Slur
 GPU-accelerated selected-CI solver. The complete RHF-vs-UHF recovery comparison was obtained on
 \emph{both} iron--sulfur active spaces: Fe$_2$S$_2$ (40 qubits) and Fe$_4$S$_4$ (72 qubits). In
 every case the configuration-recovery loop converges within $\sim$3 iterations, pulling the energy
-several hundred mHa below the UHF reference toward CCSD(T); the restricted (RHF) reference recovers
-slightly deeper than the unrestricted (UHF) one in both systems. Best recovered energies (Ha):
-Fe$_2$S$_2$ UHF $-116.271$ / RHF $-116.361$; Fe$_4$S$_4$ UHF $-326.519$ / RHF $-326.632$. Every
-step --- GPU build, sampling, pool persistence, multi-iteration recovery, references, and figures
+several hundred mHa below the UHF reference; the restricted (RHF) reference recovers deeper than the
+unrestricted (UHF) one in both systems. Best recovered energies (Ha): Fe$_2$S$_2$ UHF $-116.271$ /
+RHF $-116.361$; Fe$_4$S$_4$ UHF $-326.519$ / RHF $-326.632$.
+
+Anchoring to a near-exact \textbf{DMRG} reference (Fe$_2$S$_2$: $-116.595$\,Ha) reframes the
+comparison honestly: these Fe--S active spaces are strongly multireference, so \textbf{CCSD(T)
+itself is $\sim$220\,mHa from exact} and is not a reliable yardstick. Measured against DMRG,
+RHF-SQD reaches CCSD(T)-level correlation ($\sim$49\,\% of the UHF$\to$DMRG gap vs CCSD(T)'s
+52\,\%) and UHF-SQD less ($\sim$30\,\%), with substantial static correlation remaining beyond all
+methods at this subspace size. The Fe$_4$S$_4$ (72q) DMRG anchor is in progress. Every step --- GPU
+build, sampling, pool persistence, multi-iteration recovery, references (incl.\ DMRG), and figures
 --- is reproducible from the commands above; all figures are in \texttt{docs/2026-07-08/figures/}.
 
 \end{document}
