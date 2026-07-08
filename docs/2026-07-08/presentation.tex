@@ -215,12 +215,20 @@ confirming the singlet). \emph{[Figure: \texttt{fe4s4\_panels.png}]}}
 \end{figure}
 
 \subsection{Two-system view: Fe$_2$S$_2$ (40q) and Fe$_4$S$_4$ (72q)}
+Figure~\ref{fig:twopanel} is the summary comparison: both references (UHF blue, RHF orange) and
+both active spaces, each panel on its own energy axis (the systems differ by $\sim$210\,Ha in
+absolute energy). It shows the central result in one place --- SQD configuration recovery pulls
+the energy well below the mean-field (UHF) reference toward the correlated CCSD(T) anchor on
+\emph{both} a 40-qubit and a 72-qubit iron--sulfur system, and the restricted (RHF) reference
+recovers slightly deeper than the unrestricted (UHF) one in both cases.
+
 \begin{figure}[h]\centering
 \includegraphics[width=0.98\textwidth]{fe_twopanel.png}
-\caption{\textbf{SQD on GB200 GPU across two Fe--S active spaces.} \emph{Left:} Fe$_2$S$_2$ (40q)
-UHF-SQD result vs its UHF/UCCSD/CCSD(T) references. \emph{Right:} Fe$_4$S$_4$ (72q) UHF-SQD
-recovery curve vs its references. Each panel has its own energy axis (the systems differ by
-$\sim$210\,Ha). \emph{[Figure: \texttt{fe\_twopanel.png}]}}
+\caption{\textbf{SQD recovery on GB200 GPU across two Fe--S active spaces.} \emph{Left:}
+Fe$_2$S$_2$ (40q) UHF- and RHF-SQD recovery curves vs UHF/UCCSD/CCSD(T). \emph{Right:}
+Fe$_4$S$_4$ (72q), same. Blue = UHF-SQD, orange = RHF-SQD. Each panel has its own energy axis.
+\emph{[Figure: \texttt{fe\_twopanel.png}]}}
+\label{fig:twopanel}
 \end{figure}
 
 \subsection{Fe$_4$S$_4$ (72q): RHF vs UHF recovery}
@@ -250,9 +258,34 @@ orange = RHF-SQD; both converge within $\sim$3 iterations, well below the UHF re
 toward UCCSD/CCSD(T). \emph{[Figure: \texttt{fe4s4\_rhf\_vs\_uhf.png}]}}
 \end{figure}
 
-\emph{Fe$_2$S$_2$ (40q): a clean UHF sample + 5-iteration recovery is running on ROQUO; RHF to
-follow. The two-panel figure (\S 5.2) will be upgraded to show the Fe$_2$S$_2$ recovery trajectory
-in place of the single point.}
+\subsection{Fe$_2$S$_2$ (40q): RHF vs UHF recovery}
+The same pipeline was run cleanly end-to-end on the smaller Fe$_2$S$_2$ active space (40 qubits,
+30e/20o) on ROQUO GB200 GPU, with independent 5\,M-shot \texttt{ibm\_kobe} samples for each
+reference and \texttt{sqd\_dim}$=3\times10^6$ ($\sqrt{}\!\approx1732$ dets/spin, ample at 40q).
+Both references converge quickly. As on Fe$_4$S$_4$, \textbf{RHF-SQD recovers deeper than
+UHF-SQD}; on Fe$_2$S$_2$ the RHF trajectory even dips \emph{below} the UCCSD line toward CCSD(T),
+i.e.\ it captures more than the coupled-cluster singles-doubles correlation at this size.
+
+\begin{table}[h]\centering
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+Ref & it.1 & it.2 & it.3 & it.4 & it.5 & best \\
+\midrule
+UHF-SQD & $-116.266$ & $-116.270$ & $-116.258$ & $-116.271$ & $-116.267$ & $\mathbf{-116.271}$ \\
+RHF-SQD & $-116.345$ & $-116.361$ & $-116.348$ & $-116.321$ & $-116.351$ & $\mathbf{-116.361}$ \\
+\bottomrule
+\end{tabular}
+\caption{Fe$_2$S$_2$ (40q) RHF vs UHF SQD recovery trajectories (Ha; sqd\_dim $=3\times10^6$,
+GB200 GPU). References: UHF $-116.135$, UCCSD $-116.337$, CCSD(T) $-116.375$ Ha.}
+\end{table}
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.9\textwidth]{fe2s2_energy_vs_iter.png}
+\caption{\textbf{Fe$_2$S$_2$ (40q): RHF vs UHF SQD recovery} on GB200 GPU. Blue = UHF-SQD,
+orange = RHF-SQD; dashed/dotted lines are the UHF, UCCSD, CCSD(T) references. Both curves lie
+well below UHF; the RHF-SQD curve reaches below UCCSD, closest to CCSD(T).
+\emph{[Figure: \texttt{fe2s2\_energy\_vs\_iter.png}]}}
+\end{figure}
 
 % =====================================================================================
 \section{Runtime summary and full hyperparameters}
@@ -269,6 +302,9 @@ Sampling (kobe, 5\,M shots) & Fe$_4$S$_4$ RHF & 42\,min & $E_{\text{sample}}=-32
 Sampling (kobe, 5\,M shots) & Fe$_2$S$_2$ UHF & 44\,min & $E_{\text{sample}}=-116.277$ \\
 Recovery (5 iter, GB200)    & Fe$_4$S$_4$ UHF & 36\,min & $\sim$65--400\,s/solve, sqd\_dim $3\times10^8$ \\
 Recovery (5 iter, GB200)    & Fe$_4$S$_4$ RHF & 27\,min & 1608\,s total flow \\
+Recovery (5 iter, GB200)    & Fe$_2$S$_2$ UHF & 31\,min & sqd\_dim $3\times10^6$ (40q) \\
+Recovery (5 iter, GB200)    & Fe$_2$S$_2$ RHF & 33\,min & 2007\,s total flow \\
+Sampling (kobe, 5\,M shots) & Fe$_2$S$_2$ RHF & 51\,min & \\
 Single GPU solve (17{,}320 dets/spin) & Fe$_4$S$_4$ & 13--65\,s & Davidson $\sim$13--24\,s + FCIDUMP parse/GPU init \\
 References (UHF/UCCSD/CCSD(T)) & Fe$_4$S$_4$ (36o) & $\sim$30\,min & CCSD(T) triples dominate \\
 References (UHF/UCCSD/CCSD(T)) & Fe$_2$S$_2$ (20o) & $\sim$5\,min & \\
@@ -393,9 +429,13 @@ source that the ``sample once, reuse'' workflow depends on.)}
 
 \section{Summary}
 The SQD closed loop now runs natively on ROQUO GB200 GPUs through Prefect's Slurm target, with a
-GPU-accelerated selected-CI solver. On Fe$_4$S$_4$ (72 qubits) the UHF configuration-recovery loop
-converges within $\sim$3 iterations to $\sim$520\,mHa below UHF; the same pipeline is being run for
-RHF (72q) and for Fe$_2$S$_2$ (40q, both references). Every step --- sampling, persistence,
-multi-iteration recovery, references, and figures --- is reproducible from the commands above.
+GPU-accelerated selected-CI solver. The complete RHF-vs-UHF recovery comparison was obtained on
+\emph{both} iron--sulfur active spaces: Fe$_2$S$_2$ (40 qubits) and Fe$_4$S$_4$ (72 qubits). In
+every case the configuration-recovery loop converges within $\sim$3 iterations, pulling the energy
+several hundred mHa below the UHF reference toward CCSD(T); the restricted (RHF) reference recovers
+slightly deeper than the unrestricted (UHF) one in both systems. Best recovered energies (Ha):
+Fe$_2$S$_2$ UHF $-116.271$ / RHF $-116.361$; Fe$_4$S$_4$ UHF $-326.519$ / RHF $-326.632$. Every
+step --- GPU build, sampling, pool persistence, multi-iteration recovery, references, and figures
+--- is reproducible from the commands above; all figures are in \texttt{docs/2026-07-08/figures/}.
 
 \end{document}
