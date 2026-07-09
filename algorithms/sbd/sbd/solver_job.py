@@ -326,11 +326,34 @@ def _read_carryover_bin(path: Path, norb: int) -> np.ndarray:
     return bits.astype(bool)
 
 
+def _read_rdm_file(path: Path, norb: int, rank: int) -> np.ndarray | None:
+    """Read a plain-text RDM file written by the SBD solver (--rdm != 0).
+
+    rank=2 -> a (norb, norb) 1-RDM; rank=4 -> a (norb, norb, norb, norb) 2-RDM.
+    Returns None if the file is absent (so a solver build without RDM output degrades gracefully
+    to occupancy-only behavior). Convention written by the solver:
+      rdm1_a.txt / rdm1_b.txt  ->  physicist's  gamma[p,q] = <q^dag p>
+      rdm2_aa.txt / rdm2_ab.txt / rdm2_bb.txt  ->  physicist's prqs: rdm2[p,r,q,s] = <p^dag r^dag s q>
+    """
+    if not path.is_file():
+        return None
+    flat = np.atleast_1d(np.loadtxt(path, dtype=np.float64)).ravel()
+    expected = norb ** rank
+    if flat.size != expected:
+        raise ValueError(
+            f"{path.name}: expected {expected} values for norb={norb} rank-{rank} RDM, "
+            f"got {flat.size}"
+        )
+    shape = (norb,) * rank
+    return flat.reshape(shape)
+
+
 def _read_files(
     *,
     work_dir: Path,
     norb: int,
     method: str = "rhf",
+    do_rdm: int = 0,
 ) -> SBDResult:
     logger = get_run_logger()
     logger.debug("Reading occ_a.txt and occ_b.txt file.")
@@ -351,13 +374,33 @@ def _read_files(
     logger.debug("Reading davidson_energy.txt file.")
     energy = float(np.loadtxt(work_dir / "davidson_energy.txt").item())
 
+    # Full RDMs for orbital optimization (written only when do_rdm != 0). Absent files -> None, so
+    # a solver build that does not emit them degrades cleanly (orbital opt then no-ops upstream).
+    rdm1 = rdm2 = rdm1_b = rdm2_ab = rdm2_bb = None
+    if do_rdm != 0:
+        logger.debug("Reading RDM files (do_rdm=%d).", do_rdm)
+        rdm1    = _read_rdm_file(work_dir / "rdm1_a.txt",  norb, rank=2)
+        rdm2    = _read_rdm_file(work_dir / "rdm2_aa.txt", norb, rank=4)
+        rdm1_b  = _read_rdm_file(work_dir / "rdm1_b.txt",  norb, rank=2)
+        rdm2_ab = _read_rdm_file(work_dir / "rdm2_ab.txt", norb, rank=4)
+        rdm2_bb = _read_rdm_file(work_dir / "rdm2_bb.txt", norb, rank=4)
+        logger.debug(
+            "RDM read: rdm1=%s rdm2=%s rdm1_b=%s rdm2_ab=%s rdm2_bb=%s",
+            None if rdm1 is None else rdm1.shape, None if rdm2 is None else rdm2.shape,
+            None if rdm1_b is None else rdm1_b.shape, None if rdm2_ab is None else rdm2_ab.shape,
+            None if rdm2_bb is None else rdm2_bb.shape,
+        )
+
     return SBDResult(
         energy=energy,
         orbital_occupancies=(occa, occb),
         carryover_bitstrings=carryover,
         carryover_bitstrings_b=carryover_b,
-        rdm1=None,
-        rdm2=None,
+        rdm1=rdm1,
+        rdm2=rdm2,
+        rdm1_b=rdm1_b,
+        rdm2_ab=rdm2_ab,
+        rdm2_bb=rdm2_bb,
     )
 
 
@@ -552,4 +595,4 @@ async def _run_sbd_inner(
     if result.exit_status != 0:
         raise RuntimeError(f"SBDSolverJob failed: exit_status={result.exit_status}")
 
-    return _read_files(work_dir=job_work_dir, norb=norb, method=solver.method)
+    return _read_files(work_dir=job_work_dir, norb=norb, method=solver.method, do_rdm=solver.do_rdm)

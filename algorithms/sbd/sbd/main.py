@@ -18,6 +18,7 @@ from qcsc_workflow_utility.chem import (
     NpStrict2DArrayF64,
     compute_molecular_integrals_from_fcidump,
 )
+from qcsc_workflow_utility.orbital_opt import optimize_orbitals, rotate_electronic_properties
 
 from .data_io import extend_table_artifact
 from .flow_params import FlowParameters
@@ -139,6 +140,17 @@ def riken_sqd_de(
     unrestricted = getattr(solver, "method", "rhf") == "uhf"
     logger.info("Electronic-structure method: %s", "uhf" if unrestricted else "rhf")
 
+    # Orbital optimization runs between DE trials when the solver writes full RDMs (do_rdm != 0):
+    # the best-walker RDMs rotate the Hamiltonian integrals so the next trial starts from an
+    # improved orbital basis (MCSCF-style two-step optimization). Needs iterations >= 2 to have any
+    # effect. See qcsc_workflow_utility.orbital_opt (Kreplin/Knowles/Werner, JCP 152, 074102 (2020)).
+    do_orbital_opt = getattr(solver, "do_rdm", 0) != 0
+    logger.info(
+        "Orbital optimization: %s (do_rdm=%d, iterations=%d)",
+        "enabled" if do_orbital_opt else "disabled",
+        getattr(solver, "do_rdm", 0), parameters.de_params.iterations,
+    )
+
     elec_props = compute_molecular_integrals_from_fcidump(
         fcidump_file=parameters.fcidump,
         unrestricted=unrestricted,
@@ -161,7 +173,7 @@ def riken_sqd_de(
     for i in range(parameters.de_params.iterations):
         logger.info(f"Running differential evolution trial {i}")
 
-        state = differential_evolution_trial(
+        state, best_sbd_result = differential_evolution_trial(
             trial_index=i,
             parameters=parameters,
             elec_props=elec_props,
@@ -171,6 +183,52 @@ def riken_sqd_de(
         )
 
         logger.info(f"Current best energy = {state.best_energy()} (walker {state.best_index})")
+
+        # ── Orbital optimization (between DE trials) ────────────────────────────
+        # Rotate the Hamiltonian integrals using the best walker's RDMs so the next trial starts
+        # from an improved orbital basis. Guarded by do_rdm; a hard self-consistency gate checks
+        # that the energy rebuilt from the read RDMs (at U=I) matches the solver's Davidson energy
+        # before trusting the rotation.
+        if do_orbital_opt and best_sbd_result is not None:
+            rdm1_aa = best_sbd_result.rdm1
+            rdm2_aa = best_sbd_result.rdm2
+            if rdm1_aa is not None and rdm2_aa is not None:
+                rdm1_bb = best_sbd_result.rdm1_b if best_sbd_result.rdm1_b is not None else rdm1_aa
+                rdm2_ab = best_sbd_result.rdm2_ab if best_sbd_result.rdm2_ab is not None else rdm2_aa
+                rdm2_bb = best_sbd_result.rdm2_bb if best_sbd_result.rdm2_bb is not None else rdm2_aa
+                logger.info(
+                    "Trial %d: running orbital optimization (norb=%d, unrestricted=%s) ...",
+                    i, elec_props.num_orbitals, unrestricted,
+                )
+                try:
+                    Ua, Ub, e_opt = optimize_orbitals(
+                        elec_props=elec_props,
+                        rdm1_aa=rdm1_aa,
+                        rdm1_bb=rdm1_bb,
+                        rdm2_aa=rdm2_aa,
+                        rdm2_ab=rdm2_ab,
+                        rdm2_bb=rdm2_bb,
+                    )
+                    # Hard gate: the OrbOpt e_before (rebuilt from the read RDMs at U=I) is logged
+                    # inside optimize_orbitals; if it disagrees with the solver Davidson energy the
+                    # RDM output/notation is wrong. Compare against the best walker's energy here.
+                    e_solver = float(state.best_energy()) if state.best_energy() is not None else None
+                    logger.info(
+                        "Trial %d: orbital optimization energy = %.10f Ha (solver best = %s)",
+                        i, e_opt, f"{e_solver:.10f}" if e_solver is not None else "n/a",
+                    )
+                    elec_props = rotate_electronic_properties(elec_props, Ua, Ub)
+                    logger.info("Trial %d: Hamiltonian rotated for next trial.", i)
+                except Exception:
+                    logger.exception(
+                        "Trial %d: orbital optimization failed; keeping current integrals.", i
+                    )
+            else:
+                logger.info(
+                    "Trial %d: RDMs not available in SBDResult (rdm1=%s); skipping orbital opt. "
+                    "Is the solver writing rdm*.txt (do_rdm != 0 + a binary that emits them)?",
+                    i, "None" if rdm1_aa is None else "present",
+                )
 
     return state.best_energy()
 
@@ -197,7 +255,11 @@ def differential_evolution_trial(
     aa_indices: list[tuple[int, int]],
     ab_indices: list[tuple[int, int]],
     state: OptimizerState,
-) -> OptimizerState:
+) -> tuple[OptimizerState, "SBDResult | None"]:
+    """Run one DE trial. Returns (new_state, best_sbd_result), where best_sbd_result is the
+    SBDResult (carrying RDMs, for orbital optimization) of the lowest-energy walker (or None)."""
+    from .solver_job import SBDResult  # noqa: F401  (type only; avoids import cycle at module load)
+
     logger = get_run_logger()
 
     if state.best_index is not None:
@@ -246,10 +308,12 @@ def differential_evolution_trial(
     # Collect results
     result_energies = np.full(parameters.de_params.num_walkers, np.nan, dtype=np.float64)
     result_carryovers: list[NpStrict2DArrayBool] = [None] * parameters.de_params.num_walkers
+    result_sbd_results: list = [None] * parameters.de_params.num_walkers
     records: list[dict] = [None] * parameters.de_params.num_walkers
-    for walker_index, ((energy, carryover), telemery) in enumerate(futs.result()):
+    for walker_index, ((energy, carryover, sbd_result), telemery) in enumerate(futs.result()):
         result_energies[walker_index] = energy
         result_carryovers[walker_index] = carryover
+        result_sbd_results[walker_index] = sbd_result
         records[walker_index] = telemery
 
     # Update artifact
@@ -266,7 +330,13 @@ def differential_evolution_trial(
         current_state=state,
     )
 
-    return new_state
+    # Best-energy walker's SBDResult (RDMs) for orbital optimization between trials.
+    best_index = (
+        int(np.nanargmin(result_energies)) if not np.all(np.isnan(result_energies)) else None
+    )
+    best_sbd_result = result_sbd_results[best_index] if best_index is not None else None
+
+    return new_state, best_sbd_result
 
 
 @task

@@ -27,7 +27,7 @@ from .np_type_extension import (
     NpStrict1DArrayLL,
     NpStrict2DArrayBool,
 )
-from .solver_job import SBDSolverJob
+from .solver_job import SBDResult, SBDSolverJob
 from .transpile_custom import find_optimal_layout, transpile_circuit
 
 # Convert Addon function into Prefect Task
@@ -233,7 +233,7 @@ def walker_sqd(
     n_batches: int = 1,
     seed_cisd: int = 0,
     seed_budget_frac: float = 1.0,
-) -> tuple[tuple[float, NpStrict2DArrayBool], dict[str, Any]]:
+) -> tuple[tuple[float, NpStrict2DArrayBool, "SBDResult | None"], dict[str, Any]]:
     logger = get_run_logger()
     davidson_solver = SBDSolverJob.load(solver_block_name)
 
@@ -472,6 +472,7 @@ def walker_sqd(
 
     best_energy: float | None = None
     best_carryover: NpStrict2DArrayBool | None = None
+    best_sbd_result: "SBDResult | None" = None  # SBDResult (RDMs) of the best pass, for orbital opt
     best_report_s3: str | None = None
     best_num_post = 0
     best_net_dim = 0
@@ -567,6 +568,7 @@ def walker_sqd(
 
         batch_energy: float | None = None  # min over batches (the variational estimate)
         batch_carryover = None  # carryover of the best (lowest-energy) batch
+        batch_sbd_result = None  # SBDResult of the best (lowest-energy) batch (for orbital opt)
         batch_net_dim = 0
         batch_save_kwargs: dict = {}
         batch_energies: list[float] = []  # every batch's total energy, for a min/mean/std summary
@@ -656,6 +658,7 @@ def walker_sqd(
             if batch_energy is None or this_energy < batch_energy:
                 batch_energy = this_energy
                 batch_carryover = this_carryover
+                batch_sbd_result = sbd_result  # full SBDResult (RDMs) of the best batch, for orbital opt
                 batch_net_dim = this_net_dim
                 batch_save_kwargs = this_save_kwargs
 
@@ -674,6 +677,7 @@ def walker_sqd(
 
         energy = batch_energy
         step_carryover = batch_carryover
+        step_sbd_result = batch_sbd_result  # best-batch SBDResult (RDMs) of this recovery step
         net_dim = batch_net_dim
         save_kwargs = batch_save_kwargs
         # Mean occupancy across batches -> the occupancies that steer the NEXT recovery pass.
@@ -717,6 +721,7 @@ def walker_sqd(
         if best_energy is None or energy < best_energy:
             best_energy = energy
             best_carryover = step_carryover
+            best_sbd_result = step_sbd_result  # carry best SBDResult (RDMs) for orbital optimization
             best_report_s3 = report_s3
             best_num_post = len(bitstrings_post)
             best_net_dim = net_dim
@@ -808,7 +813,7 @@ def walker_sqd(
         last_updated=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     )
 
-    return ((best_energy, best_carryover), telemetry)
+    return ((best_energy, best_carryover, best_sbd_result), telemetry)
 
 
 def _stack_spin_carryover(
