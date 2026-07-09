@@ -31,6 +31,7 @@ int main(int argc, char * argv[]) {
   std::string fcidumpfile("fcidump.txt");
   std::string loadname("");
   std::string savename("");
+  int do_rdm = 0;  // --rdm N: when N != 0, dump per-spin-block 1- and 2-RDMs for orbital optimization.
 
   // Optional CLI overrides, matching the upstream
   // apps/chemistry_tpb_selected_basis_diagonalization reference:
@@ -49,6 +50,9 @@ int main(int argc, char * argv[]) {
     }
     if( std::string(argv[i]) == "--bdetfile" && i + 1 < argc ) {
       bdetfile = argv[i + 1];
+    }
+    if( std::string(argv[i]) == "--rdm" && i + 1 < argc ) {
+      do_rdm = std::atoi(argv[i + 1]);
     }
   }
 
@@ -157,6 +161,44 @@ int main(int argc, char * argv[]) {
       // UHF: beta carryover is independent of alpha; write it alongside carryover.bin.
       std::cout << "Number of beta carryover determinants: " << co_bdet.size() << std::endl;
       write_carryover("carryover_b.bin", co_bdet);
+    }
+
+    // ── Per-spin-block RDM output for orbital optimization (--rdm != 0) ──────────
+    // sbd::tpb::diag fills, in spin-orbital index (io,jo,ia,ja):
+    //   one_p_rdm[s][io + L*jo]                        = <c^dag_{io,s} c_{jo,s}>
+    //   two_p_rdm[s+2*t][io + L*jo + L^2*ia + L^3*ja]  = <c^dag_{io,s} c^dag_{jo,t} c_{ja,t} c_{ia,s}>
+    // We write these in the SAME native index layout, which already matches the conventions the
+    // Python side expects (verified against the solver's own energy contraction in the reference
+    // app: onebody = sum h1[io,jo]*one_p_rdm[s][io+L*jo]; twobody = 0.5*sum
+    // I2(io,ia,jo,ja)*two_p_rdm[s][io+L*jo+L^2*ia+L^3*ja]):
+    //   rdm1_a/b.txt  -> gamma[p,q] = <q^dag p>   (solver's one_p_rdm[s], no permutation)
+    //   rdm2_aa/ab/bb.txt -> prqs: rdm2[p,r,q,s] = <p^dag r^dag s q>  (solver's two_p_rdm block)
+    // Column format: "i j value" (rank-2) / "i j k l value" (rank-4); Python reshapes row-major.
+    if( do_rdm != 0 ) {
+      auto write_rdm1 = [&](const std::string & fn, const std::vector<double> & r1) {
+        std::ofstream ofs(fn); ofs.precision(16);
+        for(int i=0; i<L; i++)
+          for(int j=0; j<L; j++)
+            ofs << r1[i + L*j] << std::endl;
+        ofs.close();
+      };
+      auto write_rdm2 = [&](const std::string & fn, const std::vector<double> & r2) {
+        std::ofstream ofs(fn); ofs.precision(16);
+        for(int i=0; i<L; i++)
+          for(int j=0; j<L; j++)
+            for(int k=0; k<L; k++)
+              for(int l=0; l<L; l++)
+                ofs << r2[i + L*j + L*L*k + L*L*L*l] << std::endl;
+        ofs.close();
+      };
+      // one_p_rdm[0]=alpha, [1]=beta;  two_p_rdm blocks by (s + 2*t): 0=aa,1=ba,2=ab,3=bb.
+      write_rdm1("rdm1_a.txt",  one_p_rdm[0]);
+      write_rdm1("rdm1_b.txt",  one_p_rdm[1]);
+      write_rdm2("rdm2_aa.txt", two_p_rdm[0]);
+      write_rdm2("rdm2_ab.txt", two_p_rdm[2]);
+      write_rdm2("rdm2_bb.txt", two_p_rdm[3]);
+      std::cout << "Wrote RDM files (do_rdm=" << do_rdm << "): rdm1_a/b.txt, rdm2_aa/ab/bb.txt"
+                << std::endl;
     }
   }
 
