@@ -411,13 +411,18 @@ def walker_sqd(
         # credentials. options["saved_samples"] is a per-walker list of saved-artifact paths (the
         # file://... or S3 keys returned by the persist step above).
         saved_paths = options.get("saved_samples")
-        if not saved_paths or walker_index >= len(saved_paths):
+        if not saved_paths:
             raise RuntimeError(
-                "quantum_source='saved' but no saved_samples path for walker "
-                f"{walker_index} (got {saved_paths!r}). Set --saved-samples-dir / "
-                "SBD_SAVED_SAMPLES_DIR to the persisted pool(s)."
+                "quantum_source='saved' but no saved_samples path (got "
+                f"{saved_paths!r}). Set --saved-samples-dir / SBD_SAVED_SAMPLES_DIR to the "
+                "persisted pool(s)."
             )
-        pool_path = saved_paths[walker_index]
+        # One pool per walker when provided; otherwise all walkers reuse the same saved pool. A
+        # reused saved sample is the molecule's single sampled distribution -- differential-evolution
+        # walkers vary only the LUCJ parameters, so diagonalizing every walker from the shared pool
+        # is correct (and required for num_walkers > 1 with a single persisted pool, e.g. the
+        # orbital-optimization DE runs).
+        pool_path = saved_paths[walker_index] if walker_index < len(saved_paths) else saved_paths[0]
         logger.info("Loading saved sample pool for walker %d: %s", walker_index, pool_path)
         packed = load_ndarray(pool_path, "packed_bits")
         num_bits = int(load_ndarray(pool_path, "num_bits")[0])
