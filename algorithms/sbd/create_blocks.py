@@ -106,6 +106,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--tolerance", type=float)
     parser.add_argument("--carryover-ratio", type=float)
     parser.add_argument("--carryover-type", type=int)
+    parser.add_argument(
+        "--do-rdm", type=int,
+        help="Solver --rdm value. 0 (default) = occupancy only. Nonzero makes the solver compute "
+             "and write the full per-spin-block 1- and 2-RDMs (rdm1_a/b.txt, rdm2_aa/ab/bb.txt) "
+             "for orbital optimization. Requires a solver binary built with the RDM writers.",
+    )
     parser.add_argument("--solver-timeout-seconds", type=float)
     parser.add_argument("--solver-mode", choices=["cpu", "gpu", "fugaku"])
     parser.add_argument("--method", choices=["rhf", "uhf"])
@@ -328,6 +334,7 @@ def _env_values() -> dict[str, Any]:
         "tolerance": env_float("SBD_TOLERANCE"),
         "carryover_ratio": env_float("SBD_CARRYOVER_RATIO"),
         "carryover_type": env_int("SBD_CARRYOVER_TYPE"),
+        "do_rdm": env_int("SBD_DO_RDM"),
         "solver_timeout_seconds": env_float("SBD_SOLVER_TIMEOUT_SECONDS"),
         "solver_mode": env_first_str("SBD_SOLVER_MODE"),
         "method": env_first_str("SBD_METHOD"),
@@ -539,6 +546,9 @@ def main() -> None:
         _pick_value(
             args.carryover_type, config.get("carryover_type"), env.get("carryover_type"), 0
         )
+    )
+    do_rdm = int(
+        _pick_value(args.do_rdm, config.get("do_rdm"), env.get("do_rdm"), 0)
     )
     # Total budget (queue wait + solve) the executor allows a single diag job. Raise this well
     # above the ~2h solve time when submitting to a congested queue (e.g. 2025-node large-queue
@@ -754,6 +764,7 @@ def main() -> None:
         tolerance=tolerance,
         carryover_ratio=carryover_ratio,
         carryover_type=carryover_type,
+        do_rdm=do_rdm,
         timeout_seconds=solver_timeout_seconds,
         solver_mode=solver_mode,
         method=method,
