@@ -208,6 +208,11 @@ def riken_sqd_de(
                         rdm2_aa=rdm2_aa,
                         rdm2_ab=rdm2_ab,
                         rdm2_bb=rdm2_bb,
+                        # The native solver (main.cc) and solver_job.py both write the 2-RDM in
+                        # prqs-storage (rdm2[p,r,q,s]=<p^dag r^dag s q>). optimize_orbitals defaults
+                        # to "pqrs"; passing "pqrs"-stored data as prqs (or vice versa) applies a
+                        # wrong transpose -> unphysical energy (~-159 Ha for OH). Must be "prqs".
+                        rdm2_notation="prqs",
                     )
                     # Hard gate: the OrbOpt e_before (rebuilt from the read RDMs at U=I) is logged
                     # inside optimize_orbitals; if it disagrees with the solver Davidson energy the
