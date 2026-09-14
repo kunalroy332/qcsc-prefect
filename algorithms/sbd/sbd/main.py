@@ -194,6 +194,10 @@ def riken_sqd_de(
         n_reps=parameters.circ_params.n_lucj_layers,
     )
 
+    # OO effect tracking: store the prediction from the previous trial's OO
+    # so the next trial can compare prediction vs actual Davidson energy.
+    _oo_prediction = None  # dict with trial, e_davidson_source, e_oo_fixed_rdm or e_oo_sc
+
     # Start differential evoluation
     for i in range(parameters.de_params.iterations):
         logger.info(f"Running differential evolution trial {i}")
@@ -209,12 +213,53 @@ def riken_sqd_de(
 
         logger.info(f"Current best energy = {state.best_energy()} (walker {state.best_index})")
 
+        # ── OO effect tracking: compare previous OO prediction with this trial's actual energy ──
+        if _oo_prediction is not None:
+            _prev = _oo_prediction
+            _e_actual = float(best_sbd_result.energy) if best_sbd_result is not None else None
+            if _e_actual is not None:
+                _delta_actual = (_e_actual - _prev["e_davidson_source"]) * 1000
+                _delta_pred = (_prev["e_oo_estimate"] - _prev["e_davidson_source"]) * 1000
+                _gap = (_e_actual - _prev["e_oo_estimate"]) * 1000
+                logger.info(
+                    "Trial %d: OO effect (from trial %d):\n"
+                    "  E_davidson(source, trial %d) [Davidson-GPU, truncated CI]:  %.10f\n"
+                    "  E_oo(%s prediction)          [%s]:  %.10f  (predicted dE=%.1f mHa)\n"
+                    "  E_davidson(actual, trial %d)  [Davidson-GPU, truncated CI]:  %.10f  (actual dE=%.1f mHa)\n"
+                    "  Prediction gap: %.1f mHa (%s)",
+                    i, _prev["trial"],
+                    _prev["trial"], _prev["e_davidson_source"],
+                    _prev["method"], _prev["method_detail"], _prev["e_oo_estimate"], _delta_pred,
+                    i, _e_actual, _delta_actual,
+                    _gap, "overestimate" if _gap < 0 else "underestimate" if _gap > 0 else "exact",
+                )
+            _oo_prediction = None
+
         # ── Orbital optimization (between DE trials) ────────────────────────────
         # Rotate the Hamiltonian integrals using the best walker's RDMs so the next trial starts
         # from an improved orbital basis. Guarded by do_rdm; a hard self-consistency gate checks
         # that the energy rebuilt from the read RDMs (at U=I) matches the solver's Davidson energy
         # before trusting the rotation.
         if do_orbital_opt and best_sbd_result is not None:
+            # Only run OO when this trial produced a new all-time best Davidson energy.
+            # A worse RDM drives the orbital gradient in a non-improving direction; skipping
+            # OO preserves the current basis until a better state arrives.
+            # Disable with OO_SKIP_NONBEST=0 to recover the old (always-fire) behavior.
+            _skip_nonbest = os.environ.get("OO_SKIP_NONBEST", "1") != "0"
+            _rdm_e = best_sbd_result.energy
+            _best_e = state.best_energy()
+            _is_new_best = (
+                _rdm_e is not None and _best_e is not None
+                and abs(_rdm_e - _best_e) < 1e-12
+            )
+            if _skip_nonbest and not _is_new_best:
+                logger.info(
+                    "Trial %d: Davidson %.6f did not beat best %.6f; skipping OO.",
+                    i, _rdm_e if _rdm_e is not None else float("nan"),
+                    _best_e if _best_e is not None else float("nan"),
+                )
+                continue  # skip to next trial
+
             rdm1_aa = best_sbd_result.rdm1
             rdm2_aa = best_sbd_result.rdm2
             if rdm1_aa is not None and rdm2_aa is not None:
@@ -222,8 +267,9 @@ def riken_sqd_de(
                 rdm2_ab = best_sbd_result.rdm2_ab if best_sbd_result.rdm2_ab is not None else rdm2_aa
                 rdm2_bb = best_sbd_result.rdm2_bb if best_sbd_result.rdm2_bb is not None else rdm2_aa
                 logger.info(
-                    "Trial %d: running orbital optimization (norb=%d, unrestricted=%s) ...",
-                    i, elec_props.num_orbitals, unrestricted,
+                    "Trial %d: running orbital optimization (norb=%d, unrestricted=%s, "
+                    "RDM source Davidson=%.10f) ...",
+                    i, elec_props.num_orbitals, unrestricted, _rdm_e,
                 )
 
                 # ── Self-consistent path (oo_resolve_rdms): re-diagonalize the fixed CI subspace
@@ -247,6 +293,8 @@ def riken_sqd_de(
                             grad_tol=getattr(parameters, "oo_grad_tol", 1e-3),
                             trust_radius=getattr(parameters, "oo_trust_radius", 0.1),
                             oo_maxiter=getattr(parameters, "oo_maxiter", 40),
+                            resolve_backend=getattr(parameters, "oo_resolve_backend", "solve_fermion"),
+                            davidson_solver=solver,
                             logger=logger,
                         )
                         logger.info(
@@ -254,7 +302,14 @@ def riken_sqd_de(
                             "(%d macro-iters). Hamiltonian rotated for next trial.",
                             i, e_sc, grad_sc, n_macro,
                         )
-                        if grad_sc < getattr(parameters, "oo_grad_tol", 1e-3):
+                        _oo_prediction = {
+                            "trial": i,
+                            "e_davidson_source": float(_rdm_e),
+                            "e_oo_estimate": float(e_sc),
+                            "method": "OO-SC",
+                            "method_detail": "JAX+Davidson-GPU, self-consistent re-diag",
+                        }
+                        if grad_sc < getattr(parameters, "oo_grad_tol", 1e-3) and not getattr(parameters, "oo_refire_every_trial", False):
                             logger.info(
                                 "Trial %d: orbitals stationary (|grad| < tol) -> freezing basis.", i
                             )
@@ -283,8 +338,8 @@ def riken_sqd_de(
                     )
                     e_solver = float(state.best_energy()) if state.best_energy() is not None else None
                     logger.info(
-                        "Trial %d: orbital optimization energy = %.10f Ha  |grad|=%.3e "
-                        "(solver best = %s)",
+                        "Trial %d: E_oo(fixed-RDM) [JAX L-BFGS-B, fixed RDM + rotated H] = %.10f Ha  "
+                        "|grad|=%.3e  (E_davidson [Davidson-GPU] = %s)",
                         i, e_opt, grad_norm,
                         f"{e_solver:.10f}" if e_solver is not None else "n/a",
                     )
@@ -311,11 +366,24 @@ def riken_sqd_de(
                     else:
                         elec_props = rotate_electronic_properties(elec_props, Ua, Ub)
                         logger.info("Trial %d: Hamiltonian rotated for next trial.", i)
-                        if grad_norm < oo_gtol:
+                        _oo_prediction = {
+                            "trial": i,
+                            "e_davidson_source": float(_rdm_e),
+                            "e_oo_estimate": float(e_opt),
+                            "method": "fixed-RDM",
+                            "method_detail": "JAX L-BFGS-B, fixed RDM",
+                        }
+                        oo_de_tol = getattr(parameters, "oo_de_tol", 1e-4)
+                        delta_e_oo = (e_solver - e_opt) if e_solver is not None else None
+                        logger.info(
+                            "Trial %d: OO energy gain dE=%s Ha (|g|=%.3e, oo_de_tol=%.1e).",
+                            i, f"{delta_e_oo:.3e}" if delta_e_oo is not None else "n/a",
+                            grad_norm, oo_de_tol,
+                        )
+                        if grad_norm < oo_gtol and not getattr(parameters, "oo_refire_every_trial", False):
                             logger.info(
-                                "Trial %d: orbital gradient |g|=%.3e < %.1e -> orbitals converged "
-                                "(Brillouin). Freezing basis for remaining trials.",
-                                i, grad_norm, oo_gtol,
+                                "Trial %d: OO dE=%.3e Ha < %.1e -> gain negligible. Freezing basis.",
+                                i, delta_e_oo, oo_de_tol,
                             )
                             do_orbital_opt = False
                 except Exception:
@@ -362,13 +430,22 @@ def differential_evolution_trial(
     logger = get_run_logger()
 
     if state.best_index is not None:
-        # Create next generation
-        trial_populations = mutation_and_crossover(
-            current_populations=state.populations,
-            best_index=state.best_index,
-            scaling_factor=parameters.de_params.fxc,
-            crossover_rate=parameters.de_params.cr_prob,
-        )
+        if parameters.de_params.num_walkers < 4:
+            # No differential evolution: DE mutation (a - b + c - d) needs >= 4 distinct
+            # walkers. With fewer, re-evaluate the SAME population each trial; the closed
+            # loop is then driven PURELY by the OO feed-forward (the Hamiltonian rotated
+            # between trials). This is the clean single-ansatz OO-effect measurement, with
+            # no DE exploration confounding whether re-diagonalizing in the rotated basis
+            # lowers the energy.
+            trial_populations = state.populations
+        else:
+            # Create next generation
+            trial_populations = mutation_and_crossover(
+                current_populations=state.populations,
+                best_index=state.best_index,
+                scaling_factor=parameters.de_params.fxc,
+                crossover_rate=parameters.de_params.cr_prob,
+            )
     else:
         # Initialize populations
         trial_populations = initialize_ucj_parameters(
