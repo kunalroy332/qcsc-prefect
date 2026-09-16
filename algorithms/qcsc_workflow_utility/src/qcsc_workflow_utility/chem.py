@@ -6,6 +6,12 @@ import warnings
 from typing import Annotated
 
 import numpy as np
+
+# Workaround: PySCF DIIS references numpy.linalg.linalg.LinAlgError which was removed
+# in numpy 2.x (now numpy.linalg._linalg). Patch it so DIIS exception handling works.
+if not hasattr(np.linalg, "linalg"):
+    import types as _types
+    np.linalg.linalg = _types.SimpleNamespace(LinAlgError=np.linalg.LinAlgError)
 from prefect import get_run_logger, task
 from pydantic import BaseModel
 from pydantic_numpy.helper.annotation import NpArrayPydanticAnnotation
@@ -625,7 +631,32 @@ def compute_molecular_integrals_from_fcidump(
         # For Fe-S cubanes, an atom-localized (Noodleman) AF guess -- supplied via FE4S4_AF_GROUPS --
         # reaches a ~33 mHa lower BS basin than the energy-ordered guess (better Fe-3d orbitals for
         # SQD to recover on). See _parse_af_groups; unset -> plain energy-ordered AF guess (default).
-        mf = _converge_broken_symmetry_uhf(mf, af_groups=_parse_af_groups())
+        # Deterministic broken-symmetry reference: cache converged UHF MOs so every run
+        # (do_rdm on/off, OO on/off) starts from the IDENTICAL reference. Fe4S4's 400-cycle SCF is
+        # thread/BLAS-order sensitive -> different BS local minima run-to-run otherwise.
+        # Disable with SBD_UHF_CACHE=0; relocate with SBD_UHF_CACHE_DIR.
+        import hashlib as _hl, os as _os
+        _cdir = _os.environ.get("SBD_UHF_CACHE_DIR", _os.path.expanduser("~/.cache/qcsc_uhf"))
+        _key = _hl.sha1((_os.path.abspath(fcidump_file) + "|af=" + str(_parse_af_groups())
+                         + "|nelec=" + str(tuple(mf.mol.nelec))).encode()).hexdigest()[:16]
+        _cpath = _os.path.join(_cdir, f"uhf_bs_{_key}.npz")
+        if _os.environ.get("SBD_UHF_CACHE", "1") != "0" and _os.path.exists(_cpath):
+            _c = np.load(_cpath)
+            mf.mo_coeff = (_c["mo_a"], _c["mo_b"])
+            mf.mo_occ = (_c["occ_a"], _c["occ_b"])
+            mf.mo_energy = (_c["ene_a"], _c["ene_b"])
+            mf.e_tot = float(_c["e_tot"]); mf.converged = True
+            print(f"[uhf-cache] reuse BS-UHF reference {_cpath} (E={mf.e_tot:.6f})")
+        else:
+            mf = _converge_broken_symmetry_uhf(mf, af_groups=_parse_af_groups())
+            try:
+                _os.makedirs(_cdir, exist_ok=True)
+                _moa, _mob = mf.mo_coeff; _oca, _ocb = mf.mo_occ; _ena, _enb = mf.mo_energy
+                np.savez(_cpath, mo_a=_moa, mo_b=_mob, occ_a=_oca, occ_b=_ocb,
+                         ene_a=_ena, ene_b=_enb, e_tot=float(mf.e_tot))
+                print(f"[uhf-cache] saved BS-UHF reference {_cpath} (E={mf.e_tot:.6f})")
+            except Exception as _e:
+                print(f"[uhf-cache] save failed (continuing): {_e}")
         return _build_property_uhf(mf, norb, spin_sq, buf)
 
     # Run HF calculation with Newton method.
@@ -639,3 +670,302 @@ def compute_molecular_integrals_from_fcidump(
     mf.kernel(dm0=dm0)
 
     return _build_property(mf, norb, spin_sq, buf)
+
+
+def refresh_cc_seed(elec_props: ElectronicProperties) -> ElectronicProperties | None:
+    """Re-run CCSD/UCCSD on the current (rotated) integrals and return updated ElectronicProperties.
+
+    This is the CC-refresh step for OO_TO_LUCJ=1: after orbital optimization rotates the
+    Hamiltonian, solve CC in the new basis so that t2 and initial_occupancy match the rotated
+    integrals. Uses the previous t2 amplitudes (from elec_props) as warm-start initial guess
+    so that UCCSD converges faster in the rotated basis. Returns a new ElectronicProperties
+    with updated t2/occupancy fields, or None if amplitudes contain NaN.
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
+    norb = elec_props.num_orbitals
+    nelec_a, nelec_b = elec_props.num_electrons
+
+    max_cycle = int(os.environ.get("SEED_CCSD_MAX_CYCLE", "200"))
+
+    if elec_props.unrestricted:
+        return _refresh_cc_seed_uhf(elec_props, log, max_cycle)
+    else:
+        return _refresh_cc_seed_rhf(elec_props, log, max_cycle)
+
+
+def _refresh_cc_seed_rhf(
+    elec_props: ElectronicProperties,
+    log,
+    max_cycle: int,
+) -> ElectronicProperties | None:
+    """CC refresh for RHF."""
+    norb = elec_props.num_orbitals
+    nelec_a, nelec_b = elec_props.num_electrons
+    h1 = np.asarray(elec_props.one_body_tensor)
+    h2 = np.asarray(elec_props.two_body_tensor)
+
+    mol = gto.M()
+    mol.nelectron = nelec_a + nelec_b
+    mol.spin = 0
+    mol.verbose = 0
+    mol.incore_anyway = True
+
+    mf = scf.RHF(mol)
+    mf.get_hcore = lambda *a, **k: h1
+    mf.get_ovlp = lambda *a, **k: np.eye(norb)
+    mf._eri = ao2mo.restore(8, h2.reshape(norb, norb, norb, norb), norb)
+    mf.mol.energy_nuc = lambda *a: elec_props.nuclear_repulsion_energy
+    mf.mol.nao_nr = lambda *a: norb
+
+    mo_coeff = np.eye(norb)
+    mo_occ = np.zeros(norb)
+    mo_occ[:nelec_a] = 2.0
+
+    # Compute proper Fock matrix diagonal for orbital energies.
+    # F_pq = h1_pq + sum_i [2*(pi|qi) - (pq|ii)] where i are occupied.
+    nocc = nelec_a
+    j_diag = 2.0 * np.einsum("piqi->pq", h2[:, :nocc, :, :nocc])
+    k_diag = -np.einsum("pqii->pq", h2[:, :, :nocc, :nocc])
+    fock = h1 + j_diag + k_diag
+    mo_energy = np.diag(fock)
+
+    # HF energy: E = sum_i h_ii + 0.5 * sum_ij [2*(ii|jj) - (ij|ji)] + E_nuc
+    e_hf = (
+        2.0 * np.einsum("ii->", h1[:nocc, :nocc])
+        + 2.0 * np.einsum("iijj->", h2[:nocc, :nocc, :nocc, :nocc])
+        - np.einsum("ijji->", h2[:nocc, :nocc, :nocc, :nocc])
+        + elec_props.nuclear_repulsion_energy
+    )
+
+    mf.mo_coeff = mo_coeff
+    mf.mo_occ = mo_occ
+    mf.mo_energy = mo_energy
+    mf.e_tot = e_hf
+    mf.converged = True
+
+    mycc = cc.CCSD(mf)
+    mycc.max_cycle = max_cycle
+    mycc.diis_space = 12
+
+    # Warm-start: use old t2 as initial guess for faster convergence in rotated basis.
+    t2_old = np.asarray(elec_props.t2)
+    t1_init = np.zeros((nelec_a, norb - nelec_a))
+    log.info("CC refresh (RHF): warm-start with old ||t2||=%.4e", np.linalg.norm(t2_old))
+    mycc.kernel(t1=t1_init, t2=t2_old)
+
+    if not mycc.converged:
+        log.warning("CC refresh (RHF): CCSD did not converge after %d cycles. Using unconverged amplitudes.", max_cycle)
+
+    t1_new, t2_new = mycc.t1, mycc.t2
+    log.info(
+        "CC refresh (RHF): converged. E_corr=%.6f ||t1||=%.4e ||t2||=%.4e",
+        mycc.e_corr, np.linalg.norm(t1_new), np.linalg.norm(t2_new),
+    )
+
+    rdm1_cc = mycc.make_rdm1()
+    occ_new = np.diag(rdm1_cc) / 2.0
+
+    if np.any(np.isnan(t2_new)) or np.any(np.isnan(occ_new)):
+        log.warning("CC refresh (RHF): NaN detected in amplitudes or occupancy. Discarding.")
+        return None
+
+    return ElectronicProperties(
+        one_body_tensor=elec_props.one_body_tensor,
+        two_body_tensor=elec_props.two_body_tensor,
+        t2=t2_new,
+        initial_occupancy=(occ_new, occ_new),
+        nuclear_repulsion_energy=elec_props.nuclear_repulsion_energy,
+        num_orbitals=norb,
+        num_electrons=elec_props.num_electrons,
+        open_shell=elec_props.open_shell,
+        spin_sq=elec_props.spin_sq,
+    )
+
+
+def _refresh_cc_seed_uhf(
+    elec_props: ElectronicProperties,
+    log,
+    max_cycle: int,
+) -> ElectronicProperties | None:
+    """CC refresh for UHF.
+
+    Build a mock UHF SCF object whose get_jk correctly handles the separate aa/ab/bb
+    integral blocks, so PySCF UCCSD.ao2mo() works natively.
+    """
+    norb = elec_props.num_orbitals
+    nelec_a, nelec_b = elec_props.num_electrons
+    h1_a = np.asarray(elec_props.one_body_tensor)
+    h1_b = np.asarray(elec_props.one_body_tensor_b)
+    h2_aa = np.asarray(elec_props.two_body_tensor)
+    h2_ab = np.asarray(elec_props.two_body_tensor_ab)
+    h2_bb = np.asarray(elec_props.two_body_tensor_bb)
+    nuc = elec_props.nuclear_repulsion_energy
+
+    mol = gto.M()
+    mol.nelectron = nelec_a + nelec_b
+    mol.spin = nelec_a - nelec_b
+    mol.verbose = 4
+    mol.incore_anyway = True
+
+    mf = scf.UHF(mol)
+    ovlp = np.eye(norb)
+    mf.get_ovlp = lambda *a, **k: ovlp
+    mf.mol.nao_nr = lambda *a: norb
+    mf.mol.energy_nuc = lambda *a: nuc
+    mf.get_hcore = lambda *a, **k: h1_a
+
+    _eri_aa_8fold = ao2mo.restore(8, h2_aa.reshape(norb, norb, norb, norb), norb)
+    _eri_bb_8fold = ao2mo.restore(8, h2_bb.reshape(norb, norb, norb, norb), norb)
+    _h2_ab = h2_ab
+    mf._eri = _eri_aa_8fold
+
+    def _uhf_get_jk(mol_arg=None, dm=None, hermi=1, with_j=True, with_k=True, omega=None):
+        if dm is None:
+            dm = mf.make_rdm1()
+        if isinstance(dm, np.ndarray) and dm.ndim == 2:
+            from pyscf.scf import hf
+            return hf.dot_eri_dm(_eri_aa_8fold, dm, hermi, with_j, with_k)
+        dm_a, dm_b = dm[0], dm[1]
+        from pyscf.scf import hf
+        vj_aa, vk_aa = hf.dot_eri_dm(_eri_aa_8fold, dm_a, hermi, with_j, with_k)
+        vj_bb, vk_bb = hf.dot_eri_dm(_eri_bb_8fold, dm_b, hermi, with_j, with_k)
+        vj_ab = np.einsum("pqrs,rs->pq", _h2_ab, dm_b) if with_j else np.zeros_like(vj_aa)
+        vj_ba = np.einsum("rspq,rs->pq", _h2_ab, dm_a) if with_j else np.zeros_like(vj_bb)
+        vj_a = vj_aa + vj_ab
+        vj_b = vj_bb + vj_ba
+        vj = np.array((vj_a, vj_b))
+        vk = np.array((vk_aa, vk_bb))
+        return vj, vk
+    mf.get_jk = _uhf_get_jk
+
+    def _uhf_get_veff(mol_arg=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
+        if dm is None:
+            dm = mf.make_rdm1()
+        vj, vk = _uhf_get_jk(dm=dm, hermi=hermi)
+        # PySCF UHF computes fock = get_hcore() + get_veff(). get_hcore returns h1_a
+        # (single matrix), so fock_b = h1_a + veff_b. To get the correct fock_b = h1_b + J_b - K_b,
+        # we must include the (h1_b - h1_a) correction in veff_b.
+        veff_a = vj[0] - vk[0]
+        veff_b = vj[1] - vk[1] + (h1_b - h1_a)
+        return np.array((veff_a, veff_b))
+    mf.get_veff = _uhf_get_veff
+
+    mo_a = np.eye(norb)
+    mo_b = np.eye(norb)
+    occ_a = np.zeros(norb)
+    occ_a[:nelec_a] = 1.0
+    occ_b = np.zeros(norb)
+    occ_b[:nelec_b] = 1.0
+
+    mf.mo_coeff = (mo_a, mo_b)
+    mf.mo_occ = (occ_a, occ_b)
+
+    nocc_a, nocc_b = nelec_a, nelec_b
+    dm_a_hf = np.zeros((norb, norb))
+    np.fill_diagonal(dm_a_hf[:nocc_a, :nocc_a], 1.0)
+    dm_b_hf = np.zeros((norb, norb))
+    np.fill_diagonal(dm_b_hf[:nocc_b, :nocc_b], 1.0)
+    vj, vk = _uhf_get_jk(dm=(dm_a_hf, dm_b_hf))
+    fock_a = h1_a + vj[0] - vk[0]
+    fock_b = h1_b + vj[1] - vk[1]
+    mf.mo_energy = (np.diag(fock_a), np.diag(fock_b))
+
+    e_uhf = (
+        np.einsum("ii->", h1_a[:nocc_a, :nocc_a])
+        + np.einsum("ii->", h1_b[:nocc_b, :nocc_b])
+        + 0.5 * (np.einsum("iijj->", h2_aa[:nocc_a, :nocc_a, :nocc_a, :nocc_a])
+                 - np.einsum("ijji->", h2_aa[:nocc_a, :nocc_a, :nocc_a, :nocc_a]))
+        + 0.5 * (np.einsum("iijj->", h2_bb[:nocc_b, :nocc_b, :nocc_b, :nocc_b])
+                 - np.einsum("ijji->", h2_bb[:nocc_b, :nocc_b, :nocc_b, :nocc_b]))
+        + np.einsum("iijj->", h2_ab[:nocc_a, :nocc_a, :nocc_b, :nocc_b])
+        + nuc
+    )
+    mf.e_tot = e_uhf
+    mf.converged = True
+
+    mycc = cc.UCCSD(mf)
+    mycc.max_cycle = max_cycle
+    mycc.diis_space = 12
+    mycc.diis_start_cycle = 20
+
+    log.info(
+        "CC refresh (UHF): e_uhf=%.6f norb=%d nelec=(%d,%d) "
+        "||h2_aa||=%.4e ||h2_ab||=%.4e ||h2_bb||=%.4e",
+        e_uhf, norb, nelec_a, nelec_b,
+        np.linalg.norm(h2_aa), np.linalg.norm(h2_ab), np.linalg.norm(h2_bb),
+    )
+
+    # Supply correct spin-block MO integrals via ao2mofn passed to _make_eris_incore.
+    # PySCF _make_eris_incore calls ao2mofn(moa), ao2mofn(mob), ao2mofn((moa,moa,mob,mob)).
+    # With mo_coeff=I the integrals are already in MO basis; return them directly.
+    def _ao2mofn(mo_or_tuple):
+        if isinstance(mo_or_tuple, tuple):
+            return h2_ab.reshape(-1)
+        _ao2mofn._n += 1
+        return (h2_aa if _ao2mofn._n == 1 else h2_bb).reshape(-1)
+    _ao2mofn._n = 0
+
+    from pyscf.cc.uccsd import _make_eris_incore
+    eris = _make_eris_incore(mycc, mycc.mo_coeff, ao2mofn=_ao2mofn)
+
+    # Warm-start: use old t1/t2 as initial guess for faster convergence.
+    t2_aa_old = np.asarray(elec_props.t2)
+    t2_ab_old = np.asarray(elec_props.t2_ab)
+    t2_bb_old = np.asarray(elec_props.t2_bb)
+    nocc_a, nocc_b = nelec_a, nelec_b
+    nvir_a, nvir_b = norb - nocc_a, norb - nocc_b
+    t1_a_init = np.zeros((nocc_a, nvir_a))
+    t1_b_init = np.zeros((nocc_b, nvir_b))
+    log.info(
+        "CC refresh (UHF): warm-start with old ||t2aa||=%.4e ||t2ab||=%.4e ||t2bb||=%.4e",
+        np.linalg.norm(t2_aa_old), np.linalg.norm(t2_ab_old), np.linalg.norm(t2_bb_old),
+    )
+    mycc.kernel(t1=(t1_a_init, t1_b_init), t2=(t2_aa_old, t2_ab_old, t2_bb_old), eris=eris)
+
+    if not mycc.converged:
+        log.warning("CC refresh (UHF): UCCSD did not converge after %d cycles. Using unconverged amplitudes.", max_cycle)
+
+    t2_aa_new, t2_ab_new, t2_bb_new = mycc.t2
+    t1_a_new, t1_b_new = mycc.t1
+    log.info(
+        "CC refresh (UHF): E_corr=%.6f converged=%s ||t1a||=%.4e ||t1b||=%.4e "
+        "||t2aa||=%.4e ||t2ab||=%.4e ||t2bb||=%.4e",
+        mycc.e_corr, mycc.converged,
+        np.linalg.norm(t1_a_new), np.linalg.norm(t1_b_new),
+        np.linalg.norm(t2_aa_new), np.linalg.norm(t2_ab_new), np.linalg.norm(t2_bb_new),
+    )
+
+    # NaN check BEFORE make_rdm1: lambda equation crashes on NaN amplitudes
+    if any(np.any(np.isnan(x)) or np.any(np.isinf(x)) for x in [t2_aa_new, t2_ab_new, t2_bb_new]):
+        log.warning("CC refresh (UHF): NaN/Inf detected in amplitudes. Discarding.")
+        return None
+
+    dm_a, dm_b = mycc.make_rdm1()
+    occ_a_new = np.diag(dm_a)
+    occ_b_new = np.diag(dm_b)
+
+    if any(np.any(np.isnan(x)) for x in [occ_a_new, occ_b_new]):
+        log.warning("CC refresh (UHF): NaN detected in occupancy. Discarding.")
+        return None
+
+    return ElectronicProperties(
+        one_body_tensor=elec_props.one_body_tensor,
+        two_body_tensor=elec_props.two_body_tensor,
+        t2=t2_aa_new,
+        one_body_tensor_b=elec_props.one_body_tensor_b,
+        two_body_tensor_ab=elec_props.two_body_tensor_ab,
+        two_body_tensor_bb=elec_props.two_body_tensor_bb,
+        t2_ab=t2_ab_new,
+        t2_bb=t2_bb_new,
+        initial_occupancy=(occ_a_new, occ_b_new),
+        nuclear_repulsion_energy=elec_props.nuclear_repulsion_energy,
+        num_orbitals=elec_props.num_orbitals,
+        num_electrons=elec_props.num_electrons,
+        open_shell=elec_props.open_shell,
+        unrestricted=True,
+        spin_sq=elec_props.spin_sq,
+    )
+
+
