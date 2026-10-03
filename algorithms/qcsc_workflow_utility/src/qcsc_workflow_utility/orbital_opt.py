@@ -3,10 +3,12 @@
 This implements the orbital-rotation step of a two-step (alternating CI / orbital)
 MCSCF optimization on top of SQD: the selected-CI diagonalization supplies the
 reduced density matrices, and here we minimize the energy over unitary orbital
-rotations U = exp(skew(x)) with the Hamiltonian integrals held fixed, then rotate
-the integrals for the next SQD trial. The orbital step is solved with L-BFGS
-(SciPy) using an analytical gradient via JAX when available (NumPy fallback
-otherwise; see the ``use_jax`` parameter of :func:`optimize_orbitals`).
+rotations U = exp(skew(x)) using the RDMs from that SQD/Davidson trial as a
+fixed objective during this one orbital-rotation call, then rotate the
+integrals for the next SQD trial. The outer SQD loop supplies fresh RDMs after
+each new Davidson trial. The orbital step is solved with L-BFGS (SciPy) using
+an analytical gradient via JAX when available (NumPy fallback otherwise; see
+the ``use_jax`` parameter of :func:`optimize_orbitals`).
 
 Reference
 ---------
@@ -64,6 +66,7 @@ Usage
   from qcsc_workflow_utility.orbital_opt import optimize_orbitals, rotate_electronic_properties
 
   # After each SQD diagonalization iteration:
+  # RDMs are frozen only during this call; pass fresh RDMs on the next trial.
   Ua, Ub, e_opt = optimize_orbitals(elec_props, rdm1_aa, rdm1_bb, rdm2_aa, rdm2_ab, rdm2_bb)
   elec_props = rotate_electronic_properties(elec_props, Ua, Ub)
 """
@@ -270,11 +273,12 @@ def optimize_orbitals(
     *,
     method: str = "L-BFGS-B",
     maxiter: int = 300,
-    ftol: float = 1e-15,
-    gtol: float = 1e-10,
+    ftol: float = 0,
+    gtol: float = 1e-5,
     rdm2_notation: str = "pqrs",
     use_jax: bool | None = None,
     trust_radius: float | None = 0.5,
+    davidson_ref_energy: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float, float]:
     """Find the orbital rotation that minimizes the SCI energy expectation value.
 
@@ -290,6 +294,9 @@ def optimize_orbitals(
     rdm1_aa, rdm1_bb:
         Alpha and beta 1-RDMs in physicist's convention: γ[p,q] = <q†p>.
         For RHF, pass the spin-resolved blocks (or sum them for the spin-free path).
+        These are the RDMs from one SQD/Davidson trial. They remain fixed
+        throughout this call; the outer loop should pass fresh RDMs after the
+        next Davidson/SQD trial.
     rdm2_aa:
         Alpha-alpha 2-RDM in physicist's convention: <p†r†sq>.
     rdm2_ab:
@@ -307,10 +314,11 @@ def optimize_orbitals(
         ``"pqrs"`` (default): PySCF / qiskit_addon_sqd convention —
             rdm2[p,q,r,s] = <p†r†sq>, correct contraction is
             ``einsum('pqrs,pqrs->', h2_chem, rdm2)``.
-        ``"prqs"``: internal convention —
+        ``"prqs"``: native SBD solver / internal convention —
             rdm2[p,r,q,s] = <p†r†sq>, correct contraction is
             ``einsum('pqrs,prqs->', h2_chem, rdm2)``.
-        ``solve_fermion`` and PySCF ``make_rdm2s`` return pqrs-storage.
+        ``solve_fermion`` and PySCF ``make_rdm2s`` return pqrs-storage;
+        the native SBD solver RDM files and ``solver_job.py`` use prqs-storage.
     use_jax : bool or None
         Control the gradient backend used by the L-BFGS-B optimizer.
         ``None`` (default): use JAX analytical gradient if JAX is importable,
@@ -413,7 +421,100 @@ def optimize_orbitals(
         )
 
     e_before = eval_obj(x0)
-    log.info("  [OrbOpt] E before optimization: %.10f Ha", e_before)
+    log.info(
+        "  [OrbOpt] E(trial-RDM; U=I) objective before optimization: %.10f Ha",
+        e_before,
+    )
+
+    # Diagnostic: decompose E(U=I) into components so the caller can compare with the solver.
+    _e1a = float(np.einsum("pq,pq->", h1_a, rdm1_aa))
+    _e1b = float(np.einsum("pq,pq->", h1_b  if elec_props.unrestricted else h1_a, rdm1_bb))
+    _e2aa = float(0.5 * np.einsum("pqrs,prqs->", h2_aa, rdm2_aa))
+    _e2ab = float(np.einsum("pqrs,prqs->", h2_ab if elec_props.unrestricted else h2_aa, rdm2_ab))
+    _e2bb = float(0.5 * np.einsum("pqrs,prqs->", h2_bb if elec_props.unrestricted else h2_aa, rdm2_bb))
+    _e_check = nuc + _e1a + _e1b + _e2aa + _e2ab + _e2bb
+    log.info(
+        "  [OrbOpt] E(trial-RDM; U=I) decomposition: nuc=%.6f e1a=%.6f e1b=%.6f "
+        "e2aa=%.6f e2ab=%.6f e2bb=%.6f total=%.10f",
+        nuc, _e1a, _e1b, _e2aa, _e2ab, _e2bb, _e_check,
+    )
+    # Trace check: Tr(rdm1_a) should equal N_alpha, Tr(rdm1_b) should equal N_beta
+    _tra = float(np.trace(rdm1_aa))
+    _trb = float(np.trace(rdm1_bb))
+    log.info(
+        "  [OrbOpt] RDM1 trace: Tr(rdm1_a)=%.6f (N_a=%d) Tr(rdm1_b)=%.6f (N_b=%d)",
+        _tra, elec_props.num_electrons[0], _trb, elec_props.num_electrons[1],
+    )
+    # --- 2-RDM self-consistency battery (prqs storage: G[p,r,q,s]=<p^dag r^dag s q>) ---
+    # Pure array checks (no re-diagonalization). If the energy recon is off but these
+    # invariants hold -> defect is in energy/integral contraction; if an invariant is
+    # violated -> the 2-RDM block itself is mis-built/mis-normalized (localizes the bug).
+    _Na, _Nb = int(elec_props.num_electrons[0]), int(elec_props.num_electrons[1])
+    _uhf = bool(elec_props.unrestricted)
+    _r2ab = rdm2_ab if (_uhf and rdm2_ab is not None) else rdm2_aa
+    _r2bb = rdm2_bb if (_uhf and rdm2_bb is not None) else rdm2_aa
+    # full double traces: sum_{p,r} G[p,r,p,r]
+    _t2aa = float(np.einsum("prpr->", rdm2_aa))
+    _t2ab = float(np.einsum("prpr->", _r2ab))
+    _t2bb = float(np.einsum("prpr->", _r2bb))
+    log.info(
+        "  [OrbOpt] 2RDM trace: aa=%.6f (want Na(Na-1)=%d) ab=%.6f (want Na*Nb=%d) "
+        "bb=%.6f (want Nb(Nb-1)=%d)",
+        _t2aa, _Na * (_Na - 1), _t2ab, _Na * _Nb, _t2bb, _Nb * (_Nb - 1),
+    )
+    # partial trace to 1-RDM: sum_r G_aa[p,r,q,r] = (Na-1) gamma_a ; sum_r G_bb[p,r,q,r]=(Nb-1) gamma_b
+    # ab over beta pair: sum_r G_ab[p,r,q,r]=Nb gamma_a ; over alpha pair: sum_p G_ab[p,r,p,s]=Na gamma_b
+    _pt_aa = np.einsum("prqr->pq", rdm2_aa)
+    _pt_bb = np.einsum("prqr->pq", _r2bb)
+    _pt_ab_b = np.einsum("prqr->pq", _r2ab)   # -> Nb * gamma_a
+    _pt_ab_a = np.einsum("prps->rs", _r2ab)   # -> Na * gamma_b
+    _d_aa = float(np.max(np.abs(_pt_aa - (_Na - 1) * rdm1_aa)))
+    _d_bb = float(np.max(np.abs(_pt_bb - (_Nb - 1) * rdm1_bb)))
+    _d_ab_b = float(np.max(np.abs(_pt_ab_b - _Nb * rdm1_aa)))
+    _d_ab_a = float(np.max(np.abs(_pt_ab_a - _Na * rdm1_bb)))
+    log.info(
+        "  [OrbOpt] 2RDM partial-trace->1RDM max|dev|: aa=%.3e bb=%.3e ab(->Nb.ga)=%.3e "
+        "ab(->Na.gb)=%.3e  [0 => 2RDM consistent with 1RDM]",
+        _d_aa, _d_bb, _d_ab_b, _d_ab_a,
+    )
+    # Self-consistency: E reconstructed from these RDMs at U=I (electronic, nuc removed)
+    # must equal the Davidson eigenvalue of the SAME state. A nonzero Delta on the SAME
+    # best_sbd_result rules provenance out and points at the RDM build / spin fallback.
+    if davidson_ref_energy is not None:
+        _elec_recon = float(e_before) - float(nuc)
+        _dsc = _elec_recon - float(davidson_ref_energy)
+        log.info(
+            "  [OrbOpt] SELF-CONSISTENCY: E_recon(elec,U=I)=%.10f  E_davidson(elec)=%.10f  "
+            "Delta=%+.3e Ha (%.3f mHa)  [same state => should be ~0]",
+            _elec_recon, float(davidson_ref_energy), _dsc, _dsc * 1000.0,
+        )
+
+    # Optional raw dump (OO_DUMP_RDM=1): persist integrals + RDMs + reference energy so the
+    # RDM->energy contraction can be brute-forced offline against the native Davidson value.
+    import os as _os
+    if _os.environ.get("OO_DUMP_RDM") == "1":
+        _dd = _os.environ.get("OO_DUMP_DIR", "/home/nfs1/q0000230/work/rdm_dumps")
+        _os.makedirs(_dd, exist_ok=True)
+        _tag = _os.environ.get("SLURM_JOB_ID", "local")
+        _idx = 0
+        while _os.path.exists(_os.path.join(_dd, f"rdmdump_{_tag}_{_idx}.npz")):
+            _idx += 1
+        _fp = _os.path.join(_dd, f"rdmdump_{_tag}_{_idx}.npz")
+        np.savez_compressed(
+            _fp,
+            h1_a=np.asarray(h1_a), h1_b=np.asarray(h1_b if elec_props.unrestricted else h1_a),
+            h2_aa=np.asarray(h2_aa),
+            h2_ab=np.asarray(h2_ab if elec_props.unrestricted else h2_aa),
+            h2_bb=np.asarray(h2_bb if elec_props.unrestricted else h2_aa),
+            rdm1_aa=np.asarray(rdm1_aa), rdm1_bb=np.asarray(rdm1_bb),
+            rdm2_aa=np.asarray(rdm2_aa),
+            rdm2_ab=np.asarray(_r2ab), rdm2_bb=np.asarray(_r2bb),
+            nuc=np.asarray(float(nuc)),
+            e_davidson=np.asarray(float(davidson_ref_energy) if davidson_ref_energy is not None else np.nan),
+            e_recon=np.asarray(float(e_before) - float(nuc)),
+            na=np.asarray(_Na), nb=np.asarray(_Nb),
+        )
+        log.info("  [OrbOpt] OO_DUMP_RDM: wrote %s", _fp)
 
     minimize_kwargs: dict = dict(
         fun=eval_obj,
@@ -428,6 +529,33 @@ def optimize_orbitals(
     # the MCSCF step-restriction safeguard against over-rotation on fixed (approximate) RDMs.
     if trust_radius is not None and method.upper() == "L-BFGS-B":
         minimize_kwargs["bounds"] = [(-trust_radius, trust_radius)] * (2 * n_p)
+
+    # --- iteration trajectory logging: follow the L-BFGS-B objective E_oo per step ---
+    # scipy calls this after every accepted iteration. Reuse the existing objective
+    # (and JAX gradient when available); all values are TOTAL energies (incl. nuc), so
+    # they compare directly against the Davidson total energy. Logging only -- does not
+    # affect the optimizer or the returned result.
+    _oo_trace = {"it": 0, "prev": e_before}
+
+    def _oo_callback(xk, *args):  # L-BFGS-B passes only xk
+        _oo_trace["it"] += 1
+        fk = float(eval_obj(xk))
+        if _use_jax:
+            gk = float(np.linalg.norm(np.asarray(grad_jax(xk))))
+            log.info(
+                "  [OrbOpt] L-BFGS-B iter %3d: E_oo=%.10f Ha  dE=%+.3e (vs prev)  "
+                "dE=%+.3e (vs U=I)  |grad|=%.3e",
+                _oo_trace["it"], fk, fk - _oo_trace["prev"], fk - e_before, gk,
+            )
+        else:
+            log.info(
+                "  [OrbOpt] L-BFGS-B iter %3d: E_oo=%.10f Ha  dE=%+.3e (vs prev)  "
+                "dE=%+.3e (vs U=I)",
+                _oo_trace["it"], fk, fk - _oo_trace["prev"], fk - e_before,
+            )
+        _oo_trace["prev"] = fk
+
+    minimize_kwargs["callback"] = _oo_callback
 
     res = scipy.optimize.minimize(**minimize_kwargs)
     x_opt = res.x
@@ -450,7 +578,7 @@ def optimize_orbitals(
         grad_norm = float(np.linalg.norm(g))
 
     log.info(
-        "  [OrbOpt] E after optimization: %.10f Ha  ΔE=%.4e  |grad|=%.3e  converged=%s  nit=%d",
+        "  [OrbOpt] E after optimization (jax calculation): %.10f Ha  ΔE=%.4e  |grad|=%.3e  converged=%s  nit=%d",
         e_after, e_after - e_before, grad_norm, res.success, res.nit,
     )
     if not res.success:
@@ -569,6 +697,8 @@ def resolve_orbitals_self_consistent(
     energy_tol: float = 1e-7,
     trust_radius: float = 0.1,
     oo_maxiter: int = 40,
+    resolve_backend: str = "solve_fermion",
+    davidson_solver=None,
     use_jax: bool | None = None,
     logger=None,
 ) -> tuple["ElectronicProperties", float, float, int]:
@@ -631,6 +761,62 @@ def resolve_orbitals_self_consistent(
     # repulsion to compare against total energies / references. Rotating orbitals never changes it.
     nuc = float(elec_props.nuclear_repulsion_energy)
 
+    # ── Re-diagonalization backend selection ────────────────────────────────────────────────
+    # The fixed subspace is re-solved in the current (rotated) basis by either the in-process CPU
+    # solve_fermion (default) or the native GPU Davidson (SBDSolverJob) -- the SAME solver the main
+    # SQD loop uses. The GPU path uses the FULL UHF integral blocks (h1_a/h1_b/aa/ab/bb) and returns
+    # RDMs in prqs-storage (matching solver_job.py); solve_fermion uses alpha integrals only and
+    # returns pqrs-storage. Hence rdm2_notation differs per backend.
+    _resolve_notation = "prqs" if resolve_backend == "davidson_gpu" else "pqrs"
+    if resolve_backend == "davidson_gpu":
+        if davidson_solver is None:
+            raise ValueError(
+                "resolve_backend='davidson_gpu' requires davidson_solver=<SBDSolverJob>."
+            )
+        if not getattr(davidson_solver, "do_rdm", 0):
+            raise ValueError(
+                "resolve_backend='davidson_gpu' requires the solver block do_rdm>=1 "
+                "(the re-solve needs full RDMs); got do_rdm=0."
+            )
+        import asyncio
+        _na, _nb = (num_elec if num_elec is not None else elec_props.num_electrons)
+        _norb = int(np.asarray(elec_props.one_body_tensor).shape[0])
+
+    def _resolve_diagonalize(ci_pair, ep_cur, *, want_rdms):
+        """Re-diagonalize the fixed subspace `ci_pair` in basis `ep_cur`.
+
+        Returns (E_total, rdms) where rdms is (rdm1_aa, rdm1_bb, rdm2_aa, rdm2_ab, rdm2_bb) in
+        `_resolve_notation` storage when want_rdms, else None.
+        """
+        if resolve_backend == "davidson_gpu":
+            # Native GPU Davidson on the fixed subspace (no sampling), full UHF integral blocks.
+            # NOTE: even want_rdms=False (line-search energy) evals compute RDMs here because the
+            # block's do_rdm>=1; the RDM cost is negligible at validation norb. A do_rdm=0 solver
+            # copy for the energy-only evals is a possible future micro-opt.
+            r = asyncio.run(davidson_solver.run(
+                ci_strings=(ci_pair[0], ci_pair[1]),
+                one_body_tensor=ep_cur.one_body_tensor,
+                two_body_tensor=ep_cur.two_body_tensor,
+                norb=_norb, nelec=(_na, _nb),
+                one_body_tensor_b=ep_cur.one_body_tensor_b,
+                two_body_tensor_ab=ep_cur.two_body_tensor_ab,
+                two_body_tensor_bb=ep_cur.two_body_tensor_bb,
+            ))
+            E = float(r.energy) + nuc
+            if not want_rdms:
+                return E, None
+            return E, (r.rdm1, r.rdm1_b, r.rdm2, r.rdm2_ab, r.rdm2_bb)
+        # default: in-process CPU solve_fermion (alpha integrals; pqrs-storage RDMs).
+        e_el, sci, _occ, _s2 = solve_fermion(
+            ci_pair, ep_cur.one_body_tensor, ep_cur.two_body_tensor, open_shell=open_shell,
+        )
+        E = float(e_el) + nuc
+        if not want_rdms:
+            return E, None
+        r1 = sci.rdm(rank=1, spin_summed=False)
+        r2 = sci.rdm(rank=2, spin_summed=False)
+        return E, (r1[0], r1[1], r2[0], r2[1], r2[-1])
+
     ep = elec_props
     prev_e = None
     e = float("nan")
@@ -640,15 +826,8 @@ def resolve_orbitals_self_consistent(
         # (1)+(2) re-diagonalize the fixed subspace in the current basis -> fresh energy + RDMs.
         # solve_fermion returns (energy, SCIState, avg_occupancies, spin_sq); SCIState.rdm(rank,
         # spin_summed=False) gives the per-spin blocks in pqrs-storage.
-        e, sci, _occ, _s2 = solve_fermion(
-            ci, ep.one_body_tensor, ep.two_body_tensor, open_shell=open_shell,
-        )
-        e = float(e) + nuc
-        rdm1 = sci.rdm(rank=1, spin_summed=False)   # shape (2, norb, norb) -> alpha, beta
-        rdm2 = sci.rdm(rank=2, spin_summed=False)   # shape (3 or 4, norb, norb, norb, norb)
-        rdm1_aa, rdm1_bb = rdm1[0], rdm1[1]
-        # qiskit-addon-sqd 2-RDM spin blocks: [aa, ab, bb] (spin_summed=False).
-        rdm2_aa, rdm2_ab, rdm2_bb = rdm2[0], rdm2[1], rdm2[-1]
+        e, _rdms = _resolve_diagonalize(ci, ep, want_rdms=True)
+        rdm1_aa, rdm1_bb, rdm2_aa, rdm2_ab, rdm2_bb = _rdms
 
         if logger is not None:
             logger.info(
@@ -681,13 +860,10 @@ def resolve_orbitals_self_consistent(
         for _ls in range(6):
             Ua, Ub, e_oo, grad_norm = optimize_orbitals(
                 ep, rdm1_aa, rdm1_bb, rdm2_aa, rdm2_ab, rdm2_bb,
-                rdm2_notation="pqrs", trust_radius=tr, maxiter=oo_maxiter, use_jax=use_jax,
+                rdm2_notation=_resolve_notation, trust_radius=tr, maxiter=oo_maxiter, use_jax=use_jax,
             )
             ep_try = rotate_electronic_properties(ep, Ua, Ub)
-            e_try, _sci2, _o2, _s2b = solve_fermion(
-                ci, ep_try.one_body_tensor, ep_try.two_body_tensor, open_shell=open_shell,
-            )
-            e_try = float(e_try) + nuc
+            e_try, _ = _resolve_diagonalize(ci, ep_try, want_rdms=False)
             if e_try <= e + 1e-12:  # true energy decreased -> accept
                 ep = ep_try
                 accepted = True
@@ -713,7 +889,5 @@ def resolve_orbitals_self_consistent(
         prev_e = e
 
     # Final re-solve in the (accepted) basis for the reported energy -- RDMs consistent with H.
-    e_final, _sci, _occ, _s2 = solve_fermion(
-        ci, ep.one_body_tensor, ep.two_body_tensor, open_shell=open_shell,
-    )
-    return ep, float(e_final) + nuc, float(grad_norm), macro
+    e_final, _ = _resolve_diagonalize(ci, ep, want_rdms=True)
+    return ep, float(e_final), float(grad_norm), macro
