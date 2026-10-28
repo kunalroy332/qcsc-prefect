@@ -103,11 +103,18 @@ def _make_job_work_dir(base_work_dir: Path) -> Path:
     return job_dir
 
 
-def _write_dets_bin(path: Path, ci_strings: np.ndarray, norb: int, *, spin: str) -> None:
+def _write_dets_bin(
+    path: Path, ci_strings: np.ndarray, norb: int, *, spin: str, num_elec: int | None = None
+) -> None:
     """Write a determinant list to ``path`` in the SBD binary format.
 
     Format matches what the SBD ``LoadAlphaDets`` reader (used for both alpha and beta files)
     expects: ``(norb + 7) // 8`` bytes per configuration, big-endian bit order.
+
+    When ``num_elec`` is given, every determinant must have exactly that many set bits and the
+    list must be duplicate-free. The solver does not check either, so a wrong-sector or repeated
+    determinant (e.g. a zero-padded carryover row, or an alpha string in the beta list when
+    Na != Nb) would otherwise be diagonalized silently.
     """
     dets = np.asarray(ci_strings, dtype=np.int64).reshape(-1)
     if np.any(dets < 0):
@@ -115,6 +122,20 @@ def _write_dets_bin(path: Path, ci_strings: np.ndarray, norb: int, *, spin: str)
     max_ci = 1 << norb
     if np.any(dets >= max_ci):
         raise ValueError(f"{spin} determinant is out of range for norb={norb}.")
+    if num_elec is not None and dets.size:
+        popcount = np.array([int(d).bit_count() for d in dets.tolist()])
+        bad = popcount != num_elec
+        if np.any(bad):
+            raise ValueError(
+                f"{int(bad.sum())} of {dets.size} {spin} determinants do not have {num_elec} "
+                f"electrons (popcounts {sorted(set(popcount[bad].tolist()))}); refusing to write "
+                "a mixed-sector determinant list."
+            )
+        n_unique = np.unique(dets).size
+        if n_unique != dets.size:
+            raise ValueError(
+                f"{spin} determinant list has {dets.size - n_unique} duplicate entries."
+            )
     bytes_per_config = (norb + 7) // 8
     with path.open("wb") as fp:
         for ci in dets:
@@ -302,8 +323,12 @@ def _prep_files(
             nelec=nelec,
         )
         logger.debug("Writing AlphaDets.bin and BetaDets.bin files.")
-        _write_dets_bin(work_dir / "AlphaDets.bin", ci_strings[0], norb, spin="alpha")
-        _write_dets_bin(work_dir / "BetaDets.bin", ci_strings[1], norb, spin="beta")
+        _write_dets_bin(
+            work_dir / "AlphaDets.bin", ci_strings[0], norb, spin="alpha", num_elec=nelec[0]
+        )
+        _write_dets_bin(
+            work_dir / "BetaDets.bin", ci_strings[1], norb, spin="beta", num_elec=nelec[1]
+        )
         return
 
     # Write PySCF FCI dump file (RHF).
@@ -318,7 +343,9 @@ def _prep_files(
 
     # Write alpha determinant list consumed by SBD binary.
     logger.debug("Writing AlphaDets.bin file.")
-    _write_dets_bin(work_dir / "AlphaDets.bin", ci_strings[0], norb, spin="alpha")
+    _write_dets_bin(
+        work_dir / "AlphaDets.bin", ci_strings[0], norb, spin="alpha", num_elec=nelec[0]
+    )
 
 
 def _read_carryover_bin(path: Path, norb: int) -> np.ndarray:
@@ -380,6 +407,12 @@ def _read_files(
         if carryover_b_path.exists():
             logger.debug("Reading carryover_b.bin file.")
             carryover_b = _read_carryover_bin(carryover_b_path, norb)
+        elif carryover.shape[0]:
+            logger.warning(
+                "UHF solver wrote %d alpha carryover determinants but no carryover_b.bin; beta "
+                "carryover is treated as empty. Is the diag binary built with -D_UHF?",
+                carryover.shape[0],
+            )
 
     logger.debug("Reading davidson_energy.txt file.")
     energy = float(np.loadtxt(work_dir / "davidson_energy.txt").item())

@@ -50,6 +50,8 @@ def _apply_cc_refresh_and_reseed(elec_props, state, logger, trial_index):
     state.best_index = None
     state.energies[:] = 0.0
     state.carryover = np.full((0, refreshed.num_orbitals), False, dtype=bool)
+    if state.carryover_b is not None:
+        state.carryover_b = np.full((0, refreshed.num_orbitals), False, dtype=bool)
     logger.info("Trial %d: DE population reset (best_index=None, carryover cleared) for re-seed.", trial_index)
 
     return refreshed, state
@@ -110,6 +112,9 @@ class OptimizerState(BaseModel):
     energies: NpStrict1DArrayF64
     populations: NpStrict2DArrayF64
     carryover: NpStrict2DArrayBool
+    # UHF beta carryover, kept separate from the alpha `carryover` (the two lists differ in length,
+    # always for Na != Nb). None for RHF, where `carryover` is shared by both spins.
+    carryover_b: NpStrict2DArrayBool | None = None
     best_index: int | None = Field(
         default=None,
         ge=0,
@@ -125,6 +130,7 @@ class OptimizerState(BaseModel):
             energies=self.energies.copy(),
             populations=self.populations.copy(),
             carryover=self.carryover.copy(),
+            carryover_b=None if self.carryover_b is None else self.carryover_b.copy(),
             best_index=self.best_index,
         )
 
@@ -680,6 +686,7 @@ def differential_evolution_trial(
             aa_indices=aa_indices,
             ab_indices=ab_indices,
             carryover=state.carryover,
+            carryover_b=state.carryover_b,
             sqd_dim=parameters.sqd_dim,
             solver_block_name=solver_block_name,
             quantum_source=parameters.quantum_source,
@@ -696,7 +703,8 @@ def differential_evolution_trial(
 
     # Collect results
     result_energies = np.full(parameters.de_params.num_walkers, np.nan, dtype=np.float64)
-    result_carryovers: list[NpStrict2DArrayBool] = [None] * parameters.de_params.num_walkers
+    # Per-walker (alpha, beta) carryover pairs; beta is None for RHF.
+    result_carryovers: list[tuple] = [None] * parameters.de_params.num_walkers
     result_sbd_results: list = [None] * parameters.de_params.num_walkers
     records: list[dict] = [None] * parameters.de_params.num_walkers
     for walker_index, ((energy, carryover, sbd_result), telemery) in enumerate(futs.result()):
@@ -778,7 +786,7 @@ def mutation_and_crossover(
 def selection(
     trial_populations: list[NpStrict2DArrayF64],
     trial_energies: NpStrict1DArrayF64,
-    trial_carryovers: list[NpStrict2DArrayBool],
+    trial_carryovers: list[tuple[NpStrict2DArrayBool, NpStrict2DArrayBool | None]],
     current_state: OptimizerState,
 ) -> OptimizerState:
     logger = get_run_logger()
@@ -808,7 +816,9 @@ def selection(
         # Update carryover when the best energy is updated
         logger.info(f"walker {best_index}: Update the best energy and carryover")
         new_state.best_index = best_index
-        new_state.carryover = trial_carryovers[best_index]
+        best_co_a, best_co_b = trial_carryovers[best_index]
+        if best_co_a is not None:  # None when the walker produced no new pass (e.g. full resume)
+            new_state.carryover, new_state.carryover_b = best_co_a, best_co_b
     for walker_idx in range(len(trial_energies)):
         if np.isnan(trial_energies[walker_idx]):
             continue
