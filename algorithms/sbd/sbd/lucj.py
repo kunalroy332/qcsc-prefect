@@ -23,6 +23,26 @@ def _default_bb_indices(
 
 
 @task
+def _pair_symmetric_noise(shape: tuple[int, ...], scale: float) -> np.ndarray:
+    """Uniform noise in [-scale/2, scale/2) with the RHF t2 pair symmetry t2[i,j,a,b] = t2[j,i,b,a].
+
+    Independent elementwise noise breaks this symmetry, and ffsim's from_t_amplitudes (validate)
+    then rejects the drifted t2, which crashed every randomized walker (num_walkers > 1).
+    """
+    r = scale * (MODULE_RNG.random(shape) - 0.5)
+    return 0.5 * (r + r.transpose(1, 0, 3, 2))
+
+
+def _antisymmetric_noise(shape: tuple[int, ...], scale: float) -> np.ndarray:
+    """Uniform-scale noise antisymmetric in (i, j) and in (a, b), as same-spin t2aa / t2bb must be.
+
+    The 1/4 keeps the entry magnitude comparable to the unsymmetrized [-scale/2, scale/2) draw.
+    """
+    r = scale * (MODULE_RNG.random(shape) - 0.5)
+    r = r - r.transpose(1, 0, 2, 3)
+    return 0.25 * (r - r.transpose(0, 1, 3, 2))
+
+
 def initialize_ucj_parameters(
     elec_props: ElectronicProperties,
     aa_indices: list[tuple[int, int]],
@@ -79,7 +99,7 @@ def initialize_ucj_parameters(
 
     # The rest of walkers are randomized parameters
     for _ in range(num_walkers - 1):
-        rand_values = randomization_factor * (MODULE_RNG.random(elec_props.t2.shape) - 0.5)
+        rand_values = _pair_symmetric_noise(elec_props.t2.shape, randomization_factor)
         drifted_params = _t2_to_ucj_parameters(t2=elec_props.t2 + rand_values)
         initial_params.append(drifted_params)
     return initial_params
@@ -99,7 +119,8 @@ def _initialize_ucj_parameters_uhf(
 
     The UCCSD t2 tuple ``(t2aa, t2ab, t2bb)`` lives across ``elec_props.t2`` / ``.t2_ab`` /
     ``.t2_bb``; interaction pairs become a 3-tuple ``(aa, ab, bb)``. Randomization perturbs all
-    three blocks independently (they have different shapes).
+    three blocks independently (they have different shapes when Na != Nb); the same-spin blocks get
+    antisymmetric noise so the drifted amplitudes stay valid t2aa / t2bb.
     """
     global MODULE_RNG
     interaction_pairs = (aa_indices, ab_indices, bb_indices)
@@ -132,10 +153,13 @@ def _initialize_ucj_parameters_uhf(
     initial_params = [_t2_to_ucj_parameters(t2=t2_tuple)]
 
     # The rest of walkers are randomized parameters; perturb each spin block independently.
+    # t2ab has no index symmetry; t2aa / t2bb must stay antisymmetric (ffsim validates this).
     for _ in range(num_walkers - 1):
-        drifted = tuple(
-            block + randomization_factor * (MODULE_RNG.random(block.shape) - 0.5)
-            for block in t2_tuple
+        t2aa, t2ab, t2bb = t2_tuple
+        drifted = (
+            t2aa + _antisymmetric_noise(t2aa.shape, randomization_factor),
+            t2ab + randomization_factor * (MODULE_RNG.random(t2ab.shape) - 0.5),
+            t2bb + _antisymmetric_noise(t2bb.shape, randomization_factor),
         )
         initial_params.append(_t2_to_ucj_parameters(t2=drifted))
     return initial_params
