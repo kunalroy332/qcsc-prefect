@@ -90,6 +90,8 @@ def _bool_rows_to_ints(rows: np.ndarray | None, norb: int) -> np.ndarray:
 
     Same convention as the carryover decoding in _subsample_one_spin. None/empty -> empty array.
     """
+    if norb > 62:
+        raise ValueError(f"_bool_rows_to_ints encodes determinants in int64; norb={norb} > 62.")
     if rows is None or np.asarray(rows).size == 0:
         return np.empty(0, dtype=np.longlong)
     weights = (1 << np.arange(norb - 1, -1, -1)).astype(np.int64)
@@ -622,7 +624,9 @@ def walker_sqd(
     # UHF: carry alpha / beta carryover as two independent (n, norb) arrays for the whole loop
     # (see _split_spin_carryover). RHF keeps the single shared array and carryover_b stays None.
     if elec_props.unrestricted:
-        carryover, carryover_b = _split_spin_carryover(carryover, norb, carryover_b)
+        carryover, carryover_b = _split_spin_carryover(
+            carryover, norb, carryover_b, elec_props.num_electrons
+        )
     else:
         carryover_b = None
 
@@ -1112,7 +1116,8 @@ def walker_sqd(
                 logger.info("[ckpt] wrote %s (next_step=%d, best=%.6f)",
                             _ckpt_path, recovery_step + 1, float(best_energy or 0.0))
             except Exception as _sexc:  # checkpointing must never break the calculation
-                logger.info("[ckpt] save skipped (%s: %s)", type(_sexc).__name__, str(_sexc)[:160])
+                logger.info("[ckpt] checkpoint save failed (non-fatal): %s: %s",
+                            type(_sexc).__name__, str(_sexc)[:160])
 
     logger.debug("Completed configuration recovery loop.")
 
@@ -1156,6 +1161,7 @@ def _split_spin_carryover(
     carryover: NpStrict2DArrayBool,
     norb: int,
     carryover_b: NpStrict2DArrayBool | None = None,
+    num_electrons: tuple[int, int] | None = None,
 ) -> tuple[NpStrict2DArrayBool, NpStrict2DArrayBool]:
     """Normalize a UHF carryover input into separate ``(alpha, beta)`` (n, norb) bool arrays.
 
@@ -1166,28 +1172,42 @@ def _split_spin_carryover(
 
     Accepted inputs:
       - ``carryover`` (n_a, norb) + ``carryover_b`` (n_b, norb): per-spin arrays (current format).
+        ``carryover_b=None`` is accepted when ``carryover`` is a per-spin (n, norb) array: the beta
+        list is then empty (the solver wrote no ``carryover_b.bin``).
       - ``carryover`` (n, 2*norb) with ``carryover_b=None``: legacy stacked (beta-left, alpha-right)
         layout from older checkpoints / OptimizerState; all-zero padding rows are dropped per half.
+        A spin with 0 electrons (``num_electrons``) has the empty string as its only valid
+        determinant, so its all-zero rows are kept (as a single row) instead of dropped.
       - an empty array: no carryover for either spin.
     """
     carryover = np.asarray(carryover, dtype=bool)
+    no_beta = np.empty((0, norb), dtype=bool)
     if carryover_b is not None:
         co_a = carryover.reshape(-1, norb) if carryover.size else np.empty((0, norb), dtype=bool)
         co_b = np.asarray(carryover_b, dtype=bool)
-        co_b = co_b.reshape(-1, norb) if co_b.size else np.empty((0, norb), dtype=bool)
+        co_b = co_b.reshape(-1, norb) if co_b.size else no_beta
     elif carryover.size == 0:
-        return np.empty((0, norb), dtype=bool), np.empty((0, norb), dtype=bool)
+        return np.empty((0, norb), dtype=bool), no_beta
     elif carryover.ndim == 2 and carryover.shape[1] == 2 * norb:
-        co_b = carryover[:, :norb]
-        co_a = carryover[:, norb:]
-        co_b = co_b[co_b.any(axis=1)]
-        co_a = co_a[co_a.any(axis=1)]
+        co_b, co_a = carryover[:, :norb], carryover[:, norb:]
+        nel_a, nel_b = num_electrons if num_electrons is not None else (None, None)
+        co_b = _drop_padding_rows(co_b, nel_b)
+        co_a = _drop_padding_rows(co_a, nel_a)
+    elif carryover.ndim == 2 and carryover.shape[1] == norb:
+        co_a, co_b = carryover, no_beta
     else:
         raise ValueError(
             f"UHF carryover must be per-spin (n, {norb}) arrays or a legacy stacked "
-            f"(n, {2 * norb}) array; got shape {carryover.shape} without a beta array."
+            f"(n, {2 * norb}) array; got shape {carryover.shape}."
         )
     return co_a, co_b
+
+
+def _drop_padding_rows(rows: np.ndarray, num_elec: int | None) -> np.ndarray:
+    """Drop all-zero (padding) rows, unless 0 electrons make the empty string the real determinant."""
+    if num_elec == 0:
+        return rows[:1] if len(rows) else rows
+    return rows[rows.any(axis=1)]
 
 
 @task

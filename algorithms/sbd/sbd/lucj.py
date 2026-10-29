@@ -22,27 +22,29 @@ def _default_bb_indices(
     return aa_indices if bb_indices is None else bb_indices
 
 
-@task
 def _pair_symmetric_noise(shape: tuple[int, ...], scale: float) -> np.ndarray:
-    """Uniform noise in [-scale/2, scale/2) with the RHF t2 pair symmetry t2[i,j,a,b] = t2[j,i,b,a].
+    """Uniform noise with the RHF t2 pair symmetry t2[i,j,a,b] = t2[j,i,b,a].
 
-    Independent elementwise noise breaks this symmetry, and ffsim's from_t_amplitudes (validate)
-    then rejects the drifted t2, which crashed every randomized walker (num_walkers > 1).
+    Symmetrising independent elementwise noise halves its variance, so the result is rescaled by
+    sqrt(2) to keep the same standard deviation as the plain [-scale/2, scale/2) draw it replaces
+    (so ``randomization_factor`` perturbs walkers by about the same amount as before).
     """
     r = scale * (MODULE_RNG.random(shape) - 0.5)
-    return 0.5 * (r + r.transpose(1, 0, 3, 2))
+    return np.sqrt(2.0) * 0.5 * (r + r.transpose(1, 0, 3, 2))
 
 
 def _antisymmetric_noise(shape: tuple[int, ...], scale: float) -> np.ndarray:
-    """Uniform-scale noise antisymmetric in (i, j) and in (a, b), as same-spin t2aa / t2bb must be.
+    """Uniform noise antisymmetric in (i, j) and in (a, b), as same-spin t2aa / t2bb must be.
 
-    The 1/4 keeps the entry magnitude comparable to the unsymmetrized [-scale/2, scale/2) draw.
+    Antisymmetrising in both index pairs reduces the variance; the factor below keeps the standard
+    deviation within about 10% of the plain [-scale/2, scale/2) draw it replaces.
     """
     r = scale * (MODULE_RNG.random(shape) - 0.5)
     r = r - r.transpose(1, 0, 2, 3)
-    return 0.25 * (r - r.transpose(0, 1, 3, 2))
+    return 0.5 * (r - r.transpose(0, 1, 3, 2))
 
 
+@task
 def initialize_ucj_parameters(
     elec_props: ElectronicProperties,
     aa_indices: list[tuple[int, int]],
