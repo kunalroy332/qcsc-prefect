@@ -85,6 +85,19 @@ def _spin_halves_as_ints(
     return alpha, beta
 
 
+def _bool_rows_to_ints(rows: np.ndarray | None, norb: int) -> np.ndarray:
+    """Encode single-spin (n, norb) bool rows as CI-string ints (bit 0 = most significant).
+
+    Same convention as the carryover decoding in _subsample_one_spin. None/empty -> empty array.
+    """
+    if norb > 62:
+        raise ValueError(f"_bool_rows_to_ints encodes determinants in int64; norb={norb} > 62.")
+    if rows is None or np.asarray(rows).size == 0:
+        return np.empty(0, dtype=np.longlong)
+    weights = (1 << np.arange(norb - 1, -1, -1)).astype(np.int64)
+    return (np.asarray(rows)[:, :norb].astype(np.int64) * weights).sum(axis=1).astype(np.longlong)
+
+
 def _comprehensive_summary(
     logger,
     *,
@@ -294,7 +307,17 @@ def walker_sqd(
     hci_boost_ncore: int = 200,
     recomb_boost: bool = False,
     recomb_max_parents: int = 250,
-) -> tuple[tuple[float, NpStrict2DArrayBool, "SBDResult | None"], dict[str, Any]]:
+    carryover_b: NpStrict2DArrayBool | None = None,
+) -> tuple[
+    tuple[float, tuple[NpStrict2DArrayBool, NpStrict2DArrayBool | None], "SBDResult | None"],
+    dict[str, Any],
+]:
+    """One DE walker: sample -> configuration recovery loop -> subsample -> SBD solve.
+
+    Carryover is per spin: ``carryover`` holds the alpha (UHF) or shared (RHF) determinants and
+    ``carryover_b`` the beta determinants (UHF only; a legacy stacked 2*norb ``carryover`` is also
+    accepted). The returned carryover is the pair ``(alpha, beta)`` with ``beta=None`` for RHF.
+    """
     logger = get_run_logger()
     davidson_solver = SBDSolverJob.load(solver_block_name)
 
@@ -583,7 +606,10 @@ def walker_sqd(
                 _resume_step = int(_ck["next_step"])
                 _resume_best = float(_ck["best_energy"])
                 _co = _ck["carryover"]
-                if _co.size:
+                if "carryover_b" in _ck.files:  # per-spin (UHF) checkpoint
+                    carryover = _co.astype(bool)
+                    carryover_b = _ck["carryover_b"].astype(bool)
+                elif _co.size:  # RHF, or a legacy stacked UHF checkpoint (split below)
                     carryover = _co.astype(bool)
                 logger.info(
                     "[ckpt] RESUME from %s: completed %d step(s), best_energy so far=%.6f",
@@ -594,6 +620,15 @@ def walker_sqd(
                 _resume_step = 0
                 _resume_best = None
     # -----------------------------------------------------------------------------------------
+
+    # UHF: carry alpha / beta carryover as two independent (n, norb) arrays for the whole loop
+    # (see _split_spin_carryover). RHF keeps the single shared array and carryover_b stays None.
+    if elec_props.unrestricted:
+        carryover, carryover_b = _split_spin_carryover(
+            carryover, norb, carryover_b, elec_props.num_electrons
+        )
+    else:
+        carryover_b = None
 
     # Per-walker random generator. recover_configurations and the subsample routines must draw
     # INDEPENDENT subspaces for each walker, otherwise differential evolution / multi-walker
@@ -611,6 +646,7 @@ def walker_sqd(
     if _resume_best is not None:
         best_energy = _resume_best  # resumed best floor; a worse new step won't overwrite it
     best_carryover: NpStrict2DArrayBool | None = None
+    best_carryover_b: NpStrict2DArrayBool | None = None  # UHF beta carryover of the best pass
     best_sbd_result: "SBDResult | None" = None  # SBDResult (RDMs) of the best pass, for orbital opt
     best_report_s3: str | None = None
     best_num_post = 0
@@ -625,7 +661,7 @@ def walker_sqd(
     # |chi_co,g \ chi_co,g-1| -- the number of NEW carryover determinants introduced at step g
     # (arXiv:2405.05068 / the observability study arXiv:2512.05484 Fig. 4b). A decreasing trend
     # means the high-weight determinants are found early and then persist -> carryover working.
-    prev_carryover_keys: set[bytes] | None = None
+    prev_carryover_keys: set[tuple[str, bytes]] | None = None
 
     # One-time diagnostics on the raw quantum samples (before any recovery).
     logger.info(
@@ -735,13 +771,11 @@ def walker_sqd(
         # estimate and the MEAN occupancy across batches to feed the next recovery pass. A single
         # batch's occupancy is too noisy to steer recovery; averaging over batches stabilizes it.
         if elec_props.unrestricted:
-            carryover_b = carryover[:, :norb]
-            carryover_a = (
-                carryover[:, norb:] if carryover.shape[1] >= 2 * norb else carryover[:, :norb]
-            )
+            carryover_a = carryover  # per-spin arrays (normalized by _split_spin_carryover)
 
         batch_energy: float | None = None  # min over batches (the variational estimate)
         batch_carryover = None  # carryover of the best (lowest-energy) batch
+        batch_carryover_b = None  # UHF beta carryover of the best batch
         batch_sbd_result = None  # SBDResult of the best (lowest-energy) batch (for orbital opt)
         batch_net_dim = 0
         batch_save_kwargs: dict = {}
@@ -785,10 +819,8 @@ def walker_sqd(
                         two_body_tensor_bb=elec_props.two_body_tensor_bb,
                     )
                 )
-                this_carryover = _stack_spin_carryover(
-                    carryover_a=sbd_result.carryover_bitstrings,
-                    carryover_b=sbd_result.carryover_bitstrings_b,
-                    norb=norb,
+                this_carryover, this_carryover_b = _split_spin_carryover(
+                    sbd_result.carryover_bitstrings, norb, sbd_result.carryover_bitstrings_b
                 )
                 this_net_dim = int(len(ci_a) * len(ci_b))
                 this_save_kwargs = dict(alphadets=ci_a, betadets=ci_b)
@@ -819,6 +851,7 @@ def walker_sqd(
                     )
                 )
                 this_carryover = sbd_result.carryover_bitstrings
+                this_carryover_b = None
                 this_net_dim = int(len(ci_strings) ** 2)
                 this_save_kwargs = dict(alphadets=ci_strings)
 
@@ -829,11 +862,14 @@ def walker_sqd(
             # limitation (frequency/occupancy selection can't surface strongly-coupled high-rank dets).
             if hci_boost > 0:
                 try:
-                    core_a = _spin_halves_as_ints(this_carryover, norb)[1] if this_carryover.size else np.empty(0, dtype=np.longlong)
+                    # Core = this spin's own carryover determinants (rank-ordered by weight). Alpha
+                    # and beta cores come from their OWN per-spin arrays: each spin's children must
+                    # keep that spin's electron count (Na != Nb) and its own orbital basis (UHF).
+                    core_a = _bool_rows_to_ints(this_carryover, norb)
                     if elec_props.unrestricted:
                         cur_a = np.asarray(this_save_kwargs["alphadets"], dtype=np.longlong)
                         cur_b = np.asarray(this_save_kwargs["betadets"], dtype=np.longlong)
-                        core_b = _spin_halves_as_ints(this_carryover, norb)[0] if this_carryover.size else np.empty(0, dtype=np.longlong)
+                        core_b = _bool_rows_to_ints(this_carryover_b, norb)
                         # aug may exceed the base subspace by up to OVERSHOOT (re-solve cost ~ aug^2, so
                         # 1.3x base => ~1.7x solve cost -- bounded, unlike the old uncapped 1.7e9 blowup).
                         # A hard clamp to sqrt(d) disabled the booster entirely once cur filled to sqrt(d).
@@ -861,8 +897,9 @@ def walker_sqd(
                                 logger.info("[diag] recovery %d/%d batch %d HCI-boost: +%d/%d dets a/b, "
                                             "dE=%.6f", recovery_step + 1, n_recovery_steps, batch + 1,
                                             int(new_a.size), int(new_b.size), r2.energy - sbd_result.energy)
-                                sbd_result = r2; this_carryover = _stack_spin_carryover(
-                                    carryover_a=r2.carryover_bitstrings, carryover_b=r2.carryover_bitstrings_b, norb=norb)
+                                sbd_result = r2
+                                this_carryover, this_carryover_b = _split_spin_carryover(
+                                    r2.carryover_bitstrings, norb, r2.carryover_bitstrings_b)
                                 this_net_dim = int(len(aug_a) * len(aug_b))
                                 this_save_kwargs = dict(alphadets=aug_a, betadets=aug_b)
                     else:
@@ -902,6 +939,7 @@ def walker_sqd(
             if batch_energy is None or this_energy < batch_energy:
                 batch_energy = this_energy
                 batch_carryover = this_carryover
+                batch_carryover_b = this_carryover_b
                 # Attach the CI subspace (alpha/beta determinant lists) to the SBDResult so a
                 # self-consistent orbital optimization can re-diagonalize this fixed subspace in a
                 # rotated basis in-process. betadets defaults to alphadets for RHF/closed-shell.
@@ -928,6 +966,7 @@ def walker_sqd(
 
         energy = batch_energy
         step_carryover = batch_carryover
+        step_carryover_b = batch_carryover_b
         step_sbd_result = batch_sbd_result  # best-batch SBDResult (RDMs) of this recovery step
         net_dim = batch_net_dim
         save_kwargs = batch_save_kwargs
@@ -965,6 +1004,7 @@ def walker_sqd(
             avg_occupancy=step_occ_a,
             avg_occupancy_b=step_occ_b,
             carryover=step_carryover,
+            **({"carryover_b": step_carryover_b} if step_carryover_b is not None else {}),
             **save_kwargs,
         )
 
@@ -972,6 +1012,7 @@ def walker_sqd(
         if best_energy is None or energy < best_energy:
             best_energy = energy
             best_carryover = step_carryover
+            best_carryover_b = step_carryover_b
             best_sbd_result = step_sbd_result  # carry best SBDResult (RDMs) for orbital optimization
             best_report_s3 = report_s3
             best_num_post = len(bitstrings_post)
@@ -985,11 +1026,12 @@ def walker_sqd(
 
         # Carryover-acquisition metric |chi_co,g \ chi_co,g-1|: how many carryover determinants at
         # this step are NEW vs the previous step's carryover set. Each carryover row is a boolean
-        # occupation vector; hash by its raw bytes to build sets. carryover_total = |chi_co,g|.
-        if step_carryover is not None and len(step_carryover):
-            cur_keys = {np.asarray(row, dtype=bool).tobytes() for row in step_carryover}
-        else:
-            cur_keys = set()
+        # occupation vector; hash by (spin, raw bytes) to build sets. carryover_total = |chi_co,g|
+        # (UHF: alpha + beta determinants, counted per spin).
+        cur_keys = set()
+        for _spin, _co in (("a", step_carryover), ("b", step_carryover_b)):
+            if _co is not None and len(_co):
+                cur_keys |= {(_spin, np.asarray(row, dtype=bool).tobytes()) for row in _co}
         carryover_total = len(cur_keys)
         if prev_carryover_keys is None:
             carryover_acquisition = carryover_total  # step 0: all carryover is "new"
@@ -1033,46 +1075,30 @@ def walker_sqd(
         # Feed the batch-averaged occupancies into the next recovery pass (self-consistency).
         avg_occ = (step_occ_a, step_occ_b)
 
-        # Persist checkpoint AFTER updating avg_occ so a resume re-enters at the NEXT step with the
-        # occupancies this step produced. Atomic (tmp + replace) so a kill mid-write can't corrupt
-        # it. best_energy/best_carryover are the running best across all steps so far.
-        if _ckpt_path is not None:
-            try:
-                _co_save = (best_carryover if best_carryover is not None
-                            else np.empty((0, 0), dtype=bool))
-                # NB: np.savez appends ".npz" to a *string* path -> writing to a file HANDLE
-                # instead keeps the exact tmp name so os.replace() finds it (atomic rename).
-                _tmp = _ckpt_path + ".tmp"
-                with open(_tmp, "wb") as _fh:
-                    np.savez(
-                        _fh,
-                        occ_a=np.asarray(step_occ_a, dtype=np.float64),
-                        occ_b=np.asarray(step_occ_b, dtype=np.float64),
-                        next_step=np.int64(recovery_step + 1),
-                        best_energy=np.float64(best_energy if best_energy is not None else 0.0),
-                        carryover=np.asarray(_co_save, dtype=bool),
-                    )
-                os.replace(_tmp, _ckpt_path)
-                logger.info("[ckpt] wrote %s (next_step=%d, best=%.6f)",
-                            _ckpt_path, recovery_step + 1, float(best_energy or 0.0))
-            except Exception as _sexc:  # checkpointing must never break the calculation
-                logger.info("[ckpt] save skipped (%s: %s)", type(_sexc).__name__, str(_sexc)[:160])
         # Feed the best batch's carryover determinants forward too. Without this the loop re-uses
         # the ORIGINAL `carryover` argument every step (empty on a fresh walker), so with
         # carryover_type>0 the high-weight determinants found in step N are discarded at step N+1
-        # and multi-step self-consistency loses the carryover half of its signal. The UHF split at
-        # the top of the loop (carryover[:, :norb] / [:, norb:]) and the RHF pass-through both accept
-        # this stacked/flat shape, matching what _stack_spin_carryover / the RHF branch produced.
+        # and multi-step self-consistency loses the carryover half of its signal. UHF carries the
+        # alpha / beta arrays separately (carryover, carryover_b); RHF passes the one array through.
         if step_carryover is not None:
             carryover = step_carryover
+            if elec_props.unrestricted:
+                carryover_b = (step_carryover_b if step_carryover_b is not None
+                               else np.empty((0, norb), dtype=bool))
 
         # Persist checkpoint AFTER updating avg_occ so a resume re-enters at the NEXT step with the
         # occupancies this step produced. Atomic (tmp + replace) so a kill mid-write can't corrupt
-        # it. best_energy/best_carryover are the running best across all steps so far.
+        # it. best_energy/best_carryover are the running best across all steps so far; UHF also
+        # stores the beta carryover (carryover_b) so a resume restores both spins unpadded.
         if _ckpt_path is not None:
             try:
                 _co_save = (best_carryover if best_carryover is not None
                             else np.empty((0, 0), dtype=bool))
+                _co_extra = {}
+                if elec_props.unrestricted:
+                    _co_extra["carryover_b"] = np.asarray(
+                        best_carryover_b if best_carryover_b is not None
+                        else np.empty((0, norb), dtype=bool), dtype=bool)
                 # NB: np.savez appends ".npz" to a *string* path -> writing to a file HANDLE
                 # instead keeps the exact tmp name so os.replace() finds it (atomic rename).
                 _tmp = _ckpt_path + ".tmp"
@@ -1084,12 +1110,14 @@ def walker_sqd(
                         next_step=np.int64(recovery_step + 1),
                         best_energy=np.float64(best_energy if best_energy is not None else 0.0),
                         carryover=np.asarray(_co_save, dtype=bool),
+                        **_co_extra,
                     )
                 os.replace(_tmp, _ckpt_path)
                 logger.info("[ckpt] wrote %s (next_step=%d, best=%.6f)",
                             _ckpt_path, recovery_step + 1, float(best_energy or 0.0))
             except Exception as _sexc:  # checkpointing must never break the calculation
-                logger.info("[ckpt] checkpoint save failed (non-fatal): %s", _sexc)
+                logger.info("[ckpt] checkpoint save failed (non-fatal): %s: %s",
+                            type(_sexc).__name__, str(_sexc)[:160])
 
     logger.debug("Completed configuration recovery loop.")
 
@@ -1126,26 +1154,60 @@ def walker_sqd(
         last_updated=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     )
 
-    return ((best_energy, best_carryover, best_sbd_result), telemetry)
+    return ((best_energy, (best_carryover, best_carryover_b), best_sbd_result), telemetry)
 
 
-def _stack_spin_carryover(
-    carryover_a: NpStrict2DArrayBool,
-    carryover_b: NpStrict2DArrayBool | None,
+def _split_spin_carryover(
+    carryover: NpStrict2DArrayBool,
     norb: int,
-) -> NpStrict2DArrayBool:
-    """Combine per-spin carryover into one (beta-left, alpha-right) 2*norb-wide bool array.
+    carryover_b: NpStrict2DArrayBool | None = None,
+    num_electrons: tuple[int, int] | None = None,
+) -> tuple[NpStrict2DArrayBool, NpStrict2DArrayBool]:
+    """Normalize a UHF carryover input into separate ``(alpha, beta)`` (n, norb) bool arrays.
 
-    Alpha and beta carryover sets can differ in length; the shorter one is zero-padded so the two
-    halves line up row-wise. This mirrors the sampled-bitstring layout consumed on the next pass.
+    Alpha and beta carryover are independent lists and generally differ in length (always when
+    Na != Nb, and whenever the per-spin det lists differ). They are therefore carried as two arrays,
+    never stacked row-wise: stacking forces the shorter spin to be zero-padded, and each all-zero
+    padding row would be decoded as the empty determinant (popcount 0) and forced into the CI list.
+
+    Accepted inputs:
+      - ``carryover`` (n_a, norb) + ``carryover_b`` (n_b, norb): per-spin arrays (current format).
+        ``carryover_b=None`` is accepted when ``carryover`` is a per-spin (n, norb) array: the beta
+        list is then empty (the solver wrote no ``carryover_b.bin``).
+      - ``carryover`` (n, 2*norb) with ``carryover_b=None``: legacy stacked (beta-left, alpha-right)
+        layout from older checkpoints / OptimizerState; all-zero padding rows are dropped per half.
+        A spin with 0 electrons (``num_electrons``) has the empty string as its only valid
+        determinant, so its all-zero rows are kept (as a single row) instead of dropped.
+      - an empty array: no carryover for either spin.
     """
-    if carryover_b is None:
-        carryover_b = np.empty((0, norb), dtype=bool)
-    n = max(carryover_a.shape[0], carryover_b.shape[0])
-    out = np.zeros((n, 2 * norb), dtype=bool)
-    out[: carryover_b.shape[0], :norb] = carryover_b
-    out[: carryover_a.shape[0], norb:] = carryover_a
-    return out
+    carryover = np.asarray(carryover, dtype=bool)
+    no_beta = np.empty((0, norb), dtype=bool)
+    if carryover_b is not None:
+        co_a = carryover.reshape(-1, norb) if carryover.size else np.empty((0, norb), dtype=bool)
+        co_b = np.asarray(carryover_b, dtype=bool)
+        co_b = co_b.reshape(-1, norb) if co_b.size else no_beta
+    elif carryover.size == 0:
+        return np.empty((0, norb), dtype=bool), no_beta
+    elif carryover.ndim == 2 and carryover.shape[1] == 2 * norb:
+        co_b, co_a = carryover[:, :norb], carryover[:, norb:]
+        nel_a, nel_b = num_electrons if num_electrons is not None else (None, None)
+        co_b = _drop_padding_rows(co_b, nel_b)
+        co_a = _drop_padding_rows(co_a, nel_a)
+    elif carryover.ndim == 2 and carryover.shape[1] == norb:
+        co_a, co_b = carryover, no_beta
+    else:
+        raise ValueError(
+            f"UHF carryover must be per-spin (n, {norb}) arrays or a legacy stacked "
+            f"(n, {2 * norb}) array; got shape {carryover.shape}."
+        )
+    return co_a, co_b
+
+
+def _drop_padding_rows(rows: np.ndarray, num_elec: int | None) -> np.ndarray:
+    """Drop all-zero (padding) rows, unless 0 electrons make the empty string the real determinant."""
+    if num_elec == 0:
+        return rows[:1] if len(rows) else rows
+    return rows[rows.any(axis=1)]
 
 
 @task

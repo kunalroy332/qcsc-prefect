@@ -1041,7 +1041,12 @@ def _refresh_cc_seed_uhf(
         log.warning("CC refresh (UHF): NaN/Inf detected in amplitudes. Discarding.")
         return (None, None) if return_energy else None
 
-    dm_a, dm_b = mycc.make_rdm1()
+    # Solve the lambda equations with the SAME spin-block eris as kernel(). A bare make_rdm1()
+    # calls solve_lambda(eris=None) -> self.ao2mo() -> _make_eris_incore WITHOUT ao2mofn, which
+    # builds aa/ab/bb from mf._eri (= h2_aa only): wrong lambdas -> wrong occupancies whenever
+    # h2_ab / h2_bb differ from h2_aa (always for BS-UHF and spin-unbalanced references).
+    l1, l2 = mycc.solve_lambda(eris=eris)
+    dm_a, dm_b = mycc.make_rdm1(l1=l1, l2=l2)
     occ_a_new = np.diag(dm_a)
     occ_b_new = np.diag(dm_b)
 
