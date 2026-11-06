@@ -337,7 +337,7 @@ def main() -> None:
     create_blocks_cmd = [
         p["python"], os.path.join(p["sbd"], "create_blocks.py"),
         "--hpc-target", HPC_TARGET, "--method", METHOD, "--solver-mode", "gpu",
-        "--slurm-account", os.environ.get("ROQUO_ACCOUNT", "q0000219"),
+        "--slurm-account", os.environ.get("ROQUO_ACCOUNT") or os.environ.get("ACCT", ""),
         "--slurm-partition", os.environ.get("ROQUO_PARTITION", "roquo"),
         "--slurm-gres", f"gpu:{min(4, total_ranks)}",  # max 4 GPUs per node
         # launcher=srun + mpi-options come from SBD_LAUNCHER/SBD_MPI_OPTIONS env (set above).

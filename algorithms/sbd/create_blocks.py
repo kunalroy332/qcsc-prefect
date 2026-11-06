@@ -3,8 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -43,11 +41,42 @@ def _register_block_types(*custom_block_classes) -> None:
             register()
 
 
-def _set_variable(variable_name: str, value: Any) -> None:
-    subprocess.run(
-        ["prefect", "variable", "set", variable_name, json.dumps(value), "--overwrite"],
-        check=True,
-    )
+# Sampling options moved from the Prefect Variable `sqd_options` into FlowParameters.sampler. These
+# inputs are still parsed so an old launcher fails loudly instead of running with the defaults.
+_REMOVED_SAMPLER_OPTIONS = {
+    "shots": "sampler.shots",
+    "n_shot_batches": "sampler.n_shot_batches",
+    "saved_samples": "sampler.saved_samples",
+    "sqd_options_json": "sampler.*",
+    "options_variable_name": "(none; no Prefect Variable is used)",
+    "dynamical_decoupling": "sampler.dynamical_decoupling",
+    "dd_sequence": "sampler.dd_sequence",
+    "gate_twirling": "sampler.gate_twirling",
+    "measure_twirling": "sampler.measure_twirling",
+}
+
+
+def _reject_removed_sampler_options(
+    args: argparse.Namespace, config: dict[str, Any], env: dict[str, Any]
+) -> None:
+    found = []
+    for key, target in _REMOVED_SAMPLER_OPTIONS.items():
+        sources = [
+            name
+            for name, value in (
+                (f"--{key.replace('_', '-')}", getattr(args, key, None)),
+                (f"config '{key}'", config.get(key)),
+                ("env", env.get(key)),
+            )
+            if value is not None
+        ]
+        if sources:
+            found.append(f"{key} ({', '.join(sources)}) -> FlowParameters.{target}")
+    if found:
+        raise SystemExit(
+            "create_blocks.py no longer sets sampling options (the Prefect Variable 'sqd_options' "
+            "was removed). Pass them as flow parameters instead:\n  " + "\n  ".join(found)
+        )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -371,6 +400,7 @@ def main() -> None:
     args = _parse_args()
     config = _load_config_file(args.config)
     env = _env_values()
+    _reject_removed_sampler_options(args, config, env)
 
     from qcsc_prefect_blocks.common.blocks import (
         CommandBlock,
@@ -644,14 +674,6 @@ def main() -> None:
         )
     ).strip()
 
-    options_variable_name = str(
-        _pick_value(
-            args.options_variable_name,
-            config.get("options_variable_name"),
-            env.get("options_variable_name"),
-            "sqd_options",
-        )
-    ).strip()
 
     if is_miyabi:
         script_default = "sbd_solver.pbs"
@@ -676,12 +698,6 @@ def main() -> None:
             "miyabi-sbd-metrics" if is_miyabi else "fugaku-sbd-metrics",
         )
     ).strip()
-
-    shots_default = 500000 if is_miyabi else 50000
-    shots = int(_pick_value(args.shots, config.get("shots"), env.get("shots"), shots_default))
-    sqd_options_json = _pick_value(
-        args.sqd_options_json, config.get("sqd_options_json"), env.get("sqd_options_json")
-    )
 
     # Derive executable keys from backend x method, matching SBDSolverJob._executable_key:
     # sbd_diag (cpu/fugaku+rhf), sbd_diag_gpu, sbd_diag_uhf, sbd_diag_gpu_uhf.
@@ -801,71 +817,11 @@ def main() -> None:
         user_args=user_args,
     ).save(solver_block_name, overwrite=True)
 
-    if sqd_options_json:
-        options_value = json.loads(str(sqd_options_json))
-    else:
-        options_value = {"params": {"shots": shots}}
-
-    # Error mitigation: inject dynamical decoupling and/or Pauli twirling into the SamplerV2
-    # options. These pass through prefect_qiskit's REST gate (extra="ignore") to the IBM Runtime
-    # server verbatim. Off by default so existing/legacy runs are byte-for-byte unchanged.
-    dd_enabled = bool(_pick_value(args.dynamical_decoupling, config.get("dynamical_decoupling"),
-                                  env.get("dynamical_decoupling"), False))
-    gate_twirl = bool(_pick_value(args.gate_twirling, config.get("gate_twirling"),
-                                  env.get("gate_twirling"), False))
-    meas_twirl = bool(_pick_value(args.measure_twirling, config.get("measure_twirling"),
-                                  env.get("measure_twirling"), False))
-    dd_sequence = _pick_value(args.dd_sequence, config.get("dd_sequence"),
-                              env.get("dd_sequence"), "XY4")
-    if dd_enabled or gate_twirl or meas_twirl:
-        params = options_value.setdefault("params", {})
-        sampler_options = params.setdefault("options", {})
-        if dd_enabled:
-            sampler_options["dynamical_decoupling"] = {
-                "enable": True,
-                "sequence_type": str(dd_sequence),
-            }
-        if gate_twirl or meas_twirl:
-            sampler_options["twirling"] = {
-                "enable_gates": bool(gate_twirl),
-                "enable_measure": bool(meas_twirl),
-            }
-        if gate_twirl:
-            # IBM Runtime rejects gate twirling on fractional gates (error 1519). The LUCJ
-            # ansatz transpiles to fractional rzz gates, and prefect_qiskit's get_target() does
-            # not expose use_fractional_gates, so gate twirling cannot run through this stack.
-            print(
-                "  WARNING: gate twirling (enable_gates) is incompatible with the fractional "
-                "rzz gates in the LUCJ circuit and will fail with IBM error 1519. Prefer "
-                "--measure-twirling and --dynamical-decoupling instead."
-            )
-
-    # Shot batching: a harness-side loop count read by walker_sqd. It lives at the TOP LEVEL of the
-    # options dict (NOT inside params, which is validated against the IBM REST schema).
-    n_shot_batches = int(_pick_value(args.n_shot_batches, config.get("n_shot_batches"),
-                                     env.get("n_shot_batches"), 1) or 1)
-    if n_shot_batches > 1:
-        options_value["n_shot_batches"] = n_shot_batches
-
-    # Saved sample pool(s): a per-walker list of persisted-artifact paths, read by walker_sqd when
-    # quantum_source='saved' to diagonalize offline without an IBM call. Top-level (harness-side),
-    # NOT inside params. From CLI it is a list (nargs="+"); from env/config a whitespace/comma string.
-    saved_samples = _pick_value(
-        args.saved_samples, config.get("saved_samples"), env.get("saved_samples"), None
-    )
-    if saved_samples:
-        if isinstance(saved_samples, str):
-            saved_samples = [p for p in re.split(r"[,\s]+", saved_samples.strip()) if p]
-        options_value["saved_samples"] = list(saved_samples)
-
-    _set_variable(options_variable_name, options_value)
-
-    print(f"Saved blocks and variable for SBD workflow (target={hpc_target})")
+    print(f"Saved blocks for SBD workflow (target={hpc_target})")
     print(f"  SBD solver block: {solver_block_name}")
     print(f"  Command block: {command_block_name}")
     print(f"  Execution profile block: {execution_profile_block_name}")
     print(f"  HPC profile block: {hpc_profile_block_name}")
-    print(f"  Options variable: {options_variable_name}")
     print(f"  Work directory: {Path(str(work_dir)).expanduser().resolve()}")
     print(f"  Method: {method}")
     print(f"  SBD executable: {Path(str(sbd_executable)).expanduser().resolve()}")
@@ -873,17 +829,7 @@ def main() -> None:
         print(f"  SBD UHF executable: {Path(str(sbd_executable_uhf)).expanduser().resolve()}")
     print(f"  Script filename: {script_filename}")
     print(f"  Metrics artifact key: {metrics_artifact_key}")
-    mitigation = options_value.get("params", {}).get("options", {})
-    if mitigation:
-        print(f"  Error mitigation: {json.dumps(mitigation)}")
-    else:
-        print("  Error mitigation: none")
-    total_shots = options_value.get("params", {}).get("shots")
-    if n_shot_batches > 1:
-        print(f"  Shots: {total_shots} = {n_shot_batches} batches x "
-              f"{int(total_shots) // n_shot_batches} (mixed via concatenate_shots)")
-    else:
-        print(f"  Shots: {total_shots} (single submission)")
+    print("  Sampling options: FlowParameters.sampler (shots, batches, DD, twirling, pools)")
 
 
 if __name__ == "__main__":

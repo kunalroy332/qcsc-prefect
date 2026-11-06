@@ -68,6 +68,16 @@ class ElectronicProperties(BaseModel):
     t2_bb: NpStrict4DArrayF64 | None = None
 
 
+def _get_logger():
+    """Prefect run logger inside a flow/task, stdlib logger otherwise (direct calls, tests)."""
+    try:
+        return get_run_logger()
+    except Exception:
+        import logging
+
+        return logging.getLogger(__name__)
+
+
 def _parse_af_groups() -> dict | None:
     """Parse the FE4S4_AF_GROUPS env var into an atom-localized AF-guess spec, or None.
 
@@ -458,13 +468,23 @@ def _build_property_uhf(
     nuclear_repulsion_energy = mf.mol.energy_nuc()
     num_elec_a, num_elec_b = mf.mol.nelec
 
-    # Run UCCSD; t2 is the tuple (t2aa, t2ab, t2bb). Strongly-correlated Fe-S active spaces do not
-    # converge in the default 50 cycles; raise max_cycle + DIIS so the amplitude seed for the LUCJ
-    # ansatz is well-formed (override via SEED_CCSD_MAX_CYCLE).
+    # Run UCCSD; t2 is the tuple (t2aa, t2ab, t2bb). Strongly-correlated Fe-S active spaces often
+    # do not converge in one 50-cycle run. Restart from the current amplitudes (fresh DIIS) up to
+    # SEED_CCSD_RESTARTS times instead of one long run (cycles per run: SEED_CCSD_MAX_CYCLE).
     mycc = cc.UCCSD(mf)
-    mycc.max_cycle = int(os.environ.get("SEED_CCSD_MAX_CYCLE", "200"))
+    mycc.max_cycle = int(os.environ.get("SEED_CCSD_MAX_CYCLE", "") or 50)
     mycc.diis_space = 12
     mycc.kernel()
+    n_runs = max(1, int(os.environ.get("SEED_CCSD_RESTARTS", "") or 10))
+    for _ in range(n_runs - 1):
+        if mycc.converged:
+            break
+        mycc.kernel(mycc.t1, mycc.t2)
+    if not mycc.converged:
+        _get_logger().warning(
+            "UCCSD seed not converged after %d run(s) x %d cycles; using the last amplitudes.",
+            n_runs, mycc.max_cycle,
+        )
     t2_aa, t2_ab, t2_bb = mycc.t2
 
     # Per-spin natural-orbital occupancies from the *correlated* UCCSD 1-RDM (in MO basis).

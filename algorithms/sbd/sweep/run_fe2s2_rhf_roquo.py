@@ -24,7 +24,7 @@ import fe2s2_common as C
 
 # ROQUO specifics -------------------------------------------------------------------------------
 METHOD = "rhf"
-ACCOUNT = os.environ.get("ROQUO_ACCOUNT", "q0000219")
+ACCOUNT = os.environ.get("ROQUO_ACCOUNT") or os.environ.get("ACCT", "")
 PARTITION = os.environ.get("ROQUO_PARTITION", "roquo")
 # "as many CPUs as allowed": a full roquo node is ~144 cores; leave a few for the orchestrator/OS.
 OMP_THREADS = int(os.environ.get("ROQUO_OMPTHREADS", "140"))

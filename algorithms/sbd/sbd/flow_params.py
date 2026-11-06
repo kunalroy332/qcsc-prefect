@@ -4,11 +4,17 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+# Unknown keys are rejected (not silently dropped): a misspelled or unsupported option in a params
+# JSON / launcher must fail at validation instead of running with the default.
+_STRICT = ConfigDict(extra="forbid")
 
 
 class CircuitParameters(BaseModel):
     """Configuration for LUCJ circuit construction."""
+
+    model_config = _STRICT
 
     n_lucj_layers: int = Field(
         default=2,
@@ -135,6 +141,8 @@ class CircuitParameters(BaseModel):
 class DEParameters(BaseModel):
     """Configuration for differential evoluation."""
 
+    model_config = _STRICT
+
     num_walkers: int = Field(
         default=4,
         description=(
@@ -183,8 +191,88 @@ class DEParameters(BaseModel):
     )
 
 
+class SamplerParameters(BaseModel):
+    """Quantum sampling options (previously the Prefect Variable ``sqd_options``)."""
+
+    model_config = _STRICT
+
+    shots: int = Field(
+        default=10_000,
+        description=(
+            "Total number of measurement shots per walker. Also the number of bitstrings drawn "
+            "when quantum_source='random'."
+        ),
+        title="Shots",
+        ge=1,
+    )
+
+    n_shot_batches: int = Field(
+        default=1,
+        description=(
+            "Split the shots into this many sampler jobs of shots // n_shot_batches each and mix "
+            "them, to reach a large shot count without one huge IBM job. 1 = single submission."
+        ),
+        title="Shot Batches",
+        ge=1,
+    )
+
+    dynamical_decoupling: bool = Field(
+        default=False,
+        description="Enable dynamical decoupling in the IBM SamplerV2 options.",
+        title="Dynamical Decoupling",
+    )
+
+    dd_sequence: Literal["XX", "XpXm", "XY4"] = Field(
+        default="XY4",
+        description="Dynamical decoupling sequence (used only when dynamical_decoupling=True).",
+        title="DD Sequence",
+    )
+
+    measure_twirling: bool = Field(
+        default=False,
+        description="Enable measurement twirling in the IBM SamplerV2 options.",
+        title="Measurement Twirling",
+    )
+
+    gate_twirling: bool = Field(
+        default=False,
+        description=(
+            "Enable gate twirling. IBM Runtime rejects it on the fractional rzz gates of the LUCJ "
+            "circuit (error 1519); keep False for LUCJ."
+        ),
+        title="Gate Twirling",
+    )
+
+    saved_samples: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Persisted sample pools (absolute paths, file://... or S3 keys, as printed by a "
+            "sampling run's [persist] line) for quantum_source='saved', one per walker; walkers "
+            "beyond the list reuse the first."
+        ),
+        title="Saved Sample Pools",
+    )
+
+    def runtime_options(self, shots: int | None = None) -> dict:
+        """SamplerV2 options for prefect_qiskit's ``QuantumRuntime.sampler`` (one submission)."""
+        options: dict = {}
+        if self.dynamical_decoupling:
+            options["dynamical_decoupling"] = {"enable": True, "sequence_type": self.dd_sequence}
+        if self.gate_twirling or self.measure_twirling:
+            options["twirling"] = {
+                "enable_gates": self.gate_twirling,
+                "enable_measure": self.measure_twirling,
+            }
+        params: dict = {"shots": int(self.shots if shots is None else shots)}
+        if options:
+            params["options"] = options
+        return {"params": params}
+
+
 class FlowParameters(BaseModel):
     """Workflow Parameters."""
+
+    model_config = _STRICT
 
     fcidump: str = Field(
         description="A path to pySCF FCIDump file of the target molecule.",
@@ -310,6 +398,11 @@ class FlowParameters(BaseModel):
     circ_params: CircuitParameters = Field(
         default_factory=CircuitParameters,
         title="Circuit Parameters",
+    )
+
+    sampler: SamplerParameters = Field(
+        default_factory=SamplerParameters,
+        title="Sampler Parameters",
     )
 
     de_params: DEParameters = Field(

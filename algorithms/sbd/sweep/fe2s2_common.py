@@ -53,7 +53,7 @@ MOLECULES: dict[str, dict] = {
     },
     "n2_20q": {
         "norb": 10, "nelec": 14, "ms2": 0,
-        "default_fcidump": "/home/q0000219/qcsc-prefect/algorithms/sbd/sweep/n2_20q.fcidump",
+        "default_fcidump": str(Path(__file__).resolve().parent / "n2_20q.fcidump"),
     },
 }
 

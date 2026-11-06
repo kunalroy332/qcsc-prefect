@@ -92,7 +92,7 @@ def _check_sizing(args: argparse.Namespace) -> None:
 
 
 def build_create_blocks_cmd(args: argparse.Namespace, *, python: str, sbd_dir: Path,
-                             work_dir: Path, pools: list[str]) -> list[str]:
+                             work_dir: Path) -> list[str]:
     cmd = [
         python, str(sbd_dir / "create_blocks.py"),
         "--hpc-target", args.hpc_target,
@@ -111,7 +111,6 @@ def build_create_blocks_cmd(args: argparse.Namespace, *, python: str, sbd_dir: P
         "--carryover-type", str(args.carryover_type),
         "--solver-timeout-seconds", str(args.solver_timeout_seconds),
         "--walltime", args.walltime,
-        "--saved-samples", *pools,
         "--sbd-executable", args.sbd_executable,
     ]
     if args.sbd_executable_uhf:
@@ -273,14 +272,14 @@ def main() -> None:
 
     pools = _pool_uris(args.pool)
     cb_cmd = build_create_blocks_cmd(args, python=args.python, sbd_dir=sbd_dir,
-                                      work_dir=work_dir, pools=pools)
+                                      work_dir=work_dir)
     print("Generating Prefect blocks:", " ".join(cb_cmd), flush=True)
     # create_blocks.py shells out to a bare `prefect` CLI (e.g. to set Variables) -- put the
     # interpreter's own bin/ dir on PATH so that resolves to the same venv's `prefect`.
     cb_env = {**os.environ, "PATH": f"{Path(args.python).parent}{os.pathsep}{os.environ['PATH']}"}
     subprocess.run(cb_cmd, cwd=sbd_dir, check=True, env=cb_env)
 
-    from sbd.flow_params import CircuitParameters, DEParameters, FlowParameters
+    from sbd.flow_params import CircuitParameters, DEParameters, FlowParameters, SamplerParameters
     from sbd.main import riken_sqd_de
 
     params = FlowParameters(
@@ -292,6 +291,7 @@ def main() -> None:
         random_seed=args.random_seed,
         solver_block_ref=args.solver_block_ref,
         circ_params=CircuitParameters(n_lucj_layers=args.n_lucj_layers),
+        sampler=SamplerParameters(saved_samples=pools),
         de_params=DEParameters(num_walkers=1, iterations=1, randomization_factor=0.2, fxc=0.5),
     )
     t0 = time.perf_counter()

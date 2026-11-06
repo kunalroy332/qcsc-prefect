@@ -698,6 +698,7 @@ def differential_evolution_trial(
             hci_boost=parameters.hci_boost,
             hci_boost_max=parameters.hci_boost_max,
             hci_boost_ncore=parameters.hci_boost_ncore,
+            sampler_params=parameters.sampler,
         )
         futs.append(prefect_fut)
 

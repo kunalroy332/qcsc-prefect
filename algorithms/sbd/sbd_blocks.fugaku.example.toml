@@ -27,7 +27,6 @@ command_block_name = "cmd-sbd-diag"
 execution_profile_block_name = "exec-sbd-fugaku"
 hpc_profile_block_name = "hpc-fugaku-sbd"
 solver_block_name = "davidson-solver"
-options_variable_name = "sqd_options"
 
 # Solver script / metrics naming
 script_filename = "sbd_solver.pjm"
@@ -43,5 +42,4 @@ tolerance = 0.01
 carryover_ratio = 0.1
 solver_mode = "cpu"
 
-# Optional runtime options variable
-shots = 50000
+# Sampling options are flow parameters: FlowParameters.sampler (e.g. "sampler": {"shots": 50000}).

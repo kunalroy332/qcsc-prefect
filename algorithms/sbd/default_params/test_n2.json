@@ -11,6 +11,9 @@
     "sabre_swap_trials": 10,
     "sabre_layout_trials": 512
   },
+  "sampler": {
+    "shots": 50000
+  },
   "de_params": {
     "num_walkers": 4,
     "iterations": 1,

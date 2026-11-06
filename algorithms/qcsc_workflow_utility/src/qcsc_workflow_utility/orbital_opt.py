@@ -493,7 +493,7 @@ def optimize_orbitals(
     # RDM->energy contraction can be brute-forced offline against the native Davidson value.
     import os as _os
     if _os.environ.get("OO_DUMP_RDM") == "1":
-        _dd = _os.environ.get("OO_DUMP_DIR", "/home/nfs1/q0000230/work/rdm_dumps")
+        _dd = _os.environ.get("OO_DUMP_DIR", _os.path.join(_os.getcwd(), "rdm_dumps"))
         _os.makedirs(_dd, exist_ok=True)
         _tag = _os.environ.get("SLURM_JOB_ID", "local")
         _idx = 0

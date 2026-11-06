@@ -1,7 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=build-genexcfix
-#SBATCH --account=qc-prj-other02
-#SBATCH --reservation=large-20260824
 #SBATCH --partition=roquo
 #SBATCH --gres=gpu:1
 #SBATCH --time=01:30:00

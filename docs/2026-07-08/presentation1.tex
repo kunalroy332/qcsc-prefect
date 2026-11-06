@@ -136,11 +136,11 @@ diagonalizer binary) is selected by the solver block's \texttt{--method}.
 \subsection{How to run it (precise, end-to-end)}
 \begin{lstlisting}[language=bash]
 # --- ROQUO login (x86_64) -> pull code, then work on a compute node (aarch64) ---
-ssh -i ~/.ssh/roquo_ed25519 q0000219@login.roquo.qc.r-ccs.riken.jp
+ssh -i ~/.ssh/roquo_ed25519 $USER@$ROQUO_LOGIN   # your ROQUO user / login host
 cd ~/qcsc-prefect && git pull origin kk/feature/uhf
 
 # 0) One-time: build the GPU solver on a COMPUTE node (aarch64, nvc++)
-srun --account=q0000219 --gres=gpu:1 --time=00:25:00 bash -lc '
+srun --account=$ACCT --gres=gpu:1 --time=00:25:00 bash -lc '
   NV=/opt/nvidia/hpc_sdk/Linux_aarch64/26.5
   export PATH=$NV/compilers/bin:$NV/comm_libs/hpcx/bin:$PATH
   export OMPI_CXX=nvc++

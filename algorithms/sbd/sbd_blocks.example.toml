@@ -28,7 +28,6 @@ execution_profile_block_name = "exec-sbd-mpi"     # Miyabi default
 hpc_profile_block_name = "hpc-miyabi-sbd"         # Miyabi default
 # hpc_profile_block_name = "hpc-fugaku-sbd"        # Fugaku suggested
 solver_block_name = "davidson-solver"
-options_variable_name = "sqd_options"
 
 # Optional solver script / metrics naming
 # script_filename = "sbd_solver.pbs"  # Miyabi default
@@ -47,6 +46,5 @@ tolerance = 0.01
 carryover_ratio = 0.1
 solver_mode = "cpu"
 
-# Optional runtime options variable
-# default if omitted: {"params":{"shots":500000}} for miyabi, {"params":{"shots":50000}} for fugaku
-shots = 50000 # Fugaku tutorial baseline; override for your workload
+# Sampling options (shots, shot batches, DD, twirling, saved pools) are flow parameters:
+# FlowParameters.sampler (e.g. "sampler": {"shots": 50000} in the params JSON).
