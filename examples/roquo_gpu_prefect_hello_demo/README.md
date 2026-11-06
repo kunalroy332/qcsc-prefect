@@ -6,7 +6,9 @@ Slurm executor and the shared block generator. It is the GPU counterpart of the
 [Fugaku](../fugaku_prefect_hello_demo/) and Miyabi hello demos.
 
 For the full walkthrough see
-[`docs/tutorials/create_qcsc_workflow_for_roquo_gpu.md`](../../docs/tutorials/create_qcsc_workflow_for_roquo_gpu.md).
+[`docs/archive/create_qcsc_workflow_for_roquo_gpu.md`](../../docs/archive/create_qcsc_workflow_for_roquo_gpu.md)
+(archived; the current ROQUO setup is
+[`docs/howto/howto_setup_qcsc_prefect_roquo.md`](../../docs/howto/howto_setup_qcsc_prefect_roquo.md)).
 
 ## Prerequisites
 

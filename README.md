@@ -148,7 +148,11 @@ See [DICE Integration](./docs/howto/howto_use_dice_prefect.md) for a longer setu
   - [Native Qiskit on Prefect](./docs/howto/howto_use_native_qiskit_prefect.md)
   - [Miyabi Hello Demo](./examples/miyabi_prefect_hello_demo/README.md)
   - [Fugaku Hello Demo](./examples/fugaku_prefect_hello_demo/README.md)
+- ROQUO (GB200) BS-UHF SQD, in order:
+  - [Set up qcsc-prefect on ROQUO](./docs/howto/howto_setup_qcsc_prefect_roquo.md)
   - [Run BS-UNO-AVAS on ROQUO](./docs/tutorials/run_bs_uno_avas_roquo.md)
+  - [Run BS-UHF SQD on ROQUO](./docs/tutorials/run_bs_uhf_sqd_roquo.md)
+  - [BS-UHF SQD on ROQUO: advanced usage](./docs/tutorials/run_bs_uhf_sqd_advanced_roquo.md)
 
 ## Code Management
 

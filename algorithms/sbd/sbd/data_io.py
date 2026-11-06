@@ -132,6 +132,18 @@ def load_ndarray(
     return arr
 
 
+def load_ndarray_optional(
+    file_path: str,
+    key: str,
+) -> np.ndarray | None:
+    """Like :func:`load_ndarray`, but return None when ``key`` is absent (e.g. metadata that
+    older artifacts were written without)."""
+    try:
+        return load_ndarray(file_path, key)
+    except AssertionError:
+        return None
+
+
 def extend_table_artifact(
     artifact_key: str,
     new_table: list[dict[str, Any]] | list[list[Any]],

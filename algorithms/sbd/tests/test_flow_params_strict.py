@@ -1,4 +1,4 @@
-"""FlowParameters strictness and the sampler options."""
+"""FlowParameters strictness and the fcidump / active_space_manifest rule."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ _PARAM_JSONS = sorted(
 @pytest.mark.parametrize("path", _PARAM_JSONS, ids=lambda p: p.name)
 def test_existing_param_jsons_still_validate(path):
     params = FlowParameters.model_validate_json(path.read_text())
-    assert params.fcidump
+    assert params.fcidump or params.active_space_manifest
 
 
 def test_param_jsons_found():
@@ -66,15 +66,34 @@ def test_known_keys_still_accepted():
     assert p.circ_params.n_lucj_layers == 1 and p.de_params.num_walkers == 1
 
 
-def test_fcidump_required():
-    with pytest.raises(ValidationError):
+def test_fcidump_or_manifest_required():
+    with pytest.raises(ValidationError, match="one of 'fcidump' or 'active_space_manifest'"):
         FlowParameters()
+    with pytest.raises(ValidationError, match="one of 'fcidump' or 'active_space_manifest'"):
+        FlowParameters(fcidump="", active_space_manifest=None)
+
+
+def test_manifest_alone_or_with_fcidump_override():
+    p = FlowParameters(active_space_manifest="/data/run/x_manifest.json")
+    assert p.fcidump is None and p.active_space_manifest.endswith("x_manifest.json")
+    # Both may be given; whether the FCIDUMP matches the manifest (sha256) is checked where the
+    # manifest is loaded, not at parameter validation (files need not exist here).
+    p = FlowParameters(fcidump="/copy/x.fcidump", active_space_manifest="/data/x_manifest.json")
+    assert p.fcidump == "/copy/x.fcidump"
 
 
 def test_round_trip_json():
-    p = FlowParameters(fcidump="/data/x.fcidump", sqd_dim=5)
+    p = FlowParameters(active_space_manifest="/data/x_manifest.json", sqd_dim=5)
     q = FlowParameters.model_validate_json(p.model_dump_json())
     assert q == p
+
+
+def test_example_manifest_params_json_validates():
+    path = _REPO / "algorithms" / "sbd" / "default_params" / "bs_fe2s2_manifest.example.json"
+    if not path.exists():
+        pytest.skip("example params JSON not present")
+    p = FlowParameters.model_validate_json(path.read_text())
+    assert p.active_space_manifest
 
 
 # ---------------------------------------------------------------------------------------------

@@ -134,6 +134,12 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# Credentials: everything in secrets/ except the tracked template and README
+# (docs/howto/howto_setup_qcsc_prefect_roquo.md, Step 6)
+secrets/*
+!secrets/README.md
+!secrets/secrets.env.example
+
 # Environments
 .env
 .envrc
@@ -148,6 +154,11 @@ venv.bak/
 # per-cluster outputs. It is NOT committed (synced to HPC via scp, not git). Final presentation
 # figures live in docs/<date>/ instead. Ignore the whole directory.
 algorithms/sbd/sweep/
+
+# Run data and logs of the tracked BS-UHF SQD launcher (algorithms/sbd/roquo/run_bs.sh): pools,
+# checkpoints, solver work dirs, results, job logs. The launcher itself is tracked.
+algorithms/sbd/roquo/runs/
+algorithms/sbd/roquo/logs/
 
 # DMRG (block2) reference runs -- scratch/run data + build artifacts synced to Fugaku
 # out-of-band, not git. Final numbers/figures for the manuscript get copied into

@@ -395,3 +395,7 @@ collapse above is purely a NISQ-noise effect, not the UHF port.
 | Tests | `tests/test_uhf.py` | — | 6 regression tests |
 
 **Net: +960 / −79 across 12 files, 7 commits, RHF path unchanged throughout.**
+
+**Follow-up:** BS-UHF references from an AVAS active-space manifest, the content-keyed UHF cache,
+strict `FlowParameters` and the saved-pool guard are described in
+[BS_UHF_MANIFEST_CHANGES_REPORT.md](BS_UHF_MANIFEST_CHANGES_REPORT.md).

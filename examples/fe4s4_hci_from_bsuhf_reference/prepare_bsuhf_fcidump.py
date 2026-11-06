@@ -45,7 +45,7 @@ Writes:
 The default --af-groups fe4s4 reproduces the pairing-(1,2) reference used throughout this work:
 up={fe1,fe2}, down={fe3,fe4}, full polarization (pol=1.0) -- E=-327.0809 Ha, <S^2>=8.877. Pass
 your own JSON (or "@file.json") to try a different fragment/pairing choice; see
-docs/tutorials/run_uhf_bsuhf_any_molecule.md Step 1 for the schema.
+docs/tutorials/run_bs_uhf_sqd_advanced_roquo.md §7 for the schema.
 """
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def parse_af_groups(raw: str) -> dict:
             "fe4": list(range(29, 34)),
             "l2": list(range(34, 36)),
             # Pairing-(1,2): reaches the deepest verified BS-UHF basin directly at full
-            # polarization -- see docs/tutorials/run_uhf_bsuhf_any_molecule.md Step 1.
+            # polarization -- see docs/tutorials/run_bs_uhf_sqd_advanced_roquo.md §7.
             "up": ["fe1", "fe2"],
             "down": ["fe3", "fe4"],
             "pol": 1.0,

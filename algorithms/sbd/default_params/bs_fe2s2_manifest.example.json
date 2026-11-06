@@ -1,0 +1,19 @@
+{
+  "active_space_manifest": "plugins/bs_uno_avas/workspace/output/RUN_NAME/RUN_NAME_manifest.json",
+  "sqd_dim": 90000,
+  "n_recovery_steps": 3,
+  "n_batches": 1,
+  "quantum_source": "random",
+  "random_seed": 24,
+  "solver_block_ref": "sbd_solver_job/davidson-solver",
+  "circ_params": {
+    "n_lucj_layers": 1,
+    "sabre_layout_trials": 512
+  },
+  "de_params": {
+    "num_walkers": 1,
+    "iterations": 1,
+    "randomization_factor": 0.2,
+    "fxc": 0.5
+  }
+}

@@ -1,0 +1,70 @@
+# BS-UHF SQD on ROQUO (run_bs.sh): the settings shared by every task (manifest) of a job.
+# Credentials are NOT here: Prefect Cloud = `prefect cloud login`, IBM = the Prefect block
+# `ibm-runner` (setup how-to Steps 5-6). Your own copy: cp run_bs.toml my.toml, then CONFIG=my.toml.
+
+# Allocation of `job` / `sweep`: one sbatch with -N <tasks> --exclusive and these flags.
+[slurm]
+account = ""        # "" = ACCT from ~/.qcsc_env
+reservation = ""    # "" = RESV from ~/.qcsc_env; used only while it is ACTIVE
+partition = "roquo"
+job_name = "bs-sqd"
+time = "1-00:00:00"     # wall time; shortened to the reservation's end. A run cut off by it
+                        # continues from its checkpoint the next time (bash run_bs.sh job)
+gpus_per_node = 4       # GPUs must be requested explicitly (else none visible)
+mem = "1600000M"        # memory per node (else the default per-CPU memory)
+
+[run]
+mode = "direct"         # "direct": run each flow at once | "cloud": serve, start it in the UI
+runs_root = ""          # "" = algorithms/sbd/roquo/runs
+gpus_per_task = 4       # GPUs per solve = MPI ranks (one per GPU); 4 = the whole node
+binary_suffix = ""      # "" = auto: diag-gpu_uhf (1 GPU), diag-gpu_uhf-mpi-hpcx250 (>1)
+omp_threads = 0         # host threads (UCCSD, Python side); 0 = all CPUs of the node
+
+[solver]                # SBDSolverJob block per task (MPI grid, threads, Davidson settings)
+# task_comm_size x adet_comm_size x bdet_comm_size must equal gpus_per_task.
+# Memory per rank shrinks with bdet_comm_size (docs/reference/hpc_resource_sizing.md).
+task_comm_size = 1
+adet_comm_size = 2      # alpha-determinant partitions
+bdet_comm_size = 2      # beta-determinant partitions
+threads = 0             # OpenMP threads per solver rank; 0 = node CPUs / ranks (144 / 4 = 36)
+iteration = 5           # Davidson iteration cap
+block = 20              # Davidson subspace size
+carryover_ratio = 0.5
+carryover_type = 1
+do_rdm = 0              # 1 = write RDMs + orbital optimization between DE trials
+timeout_seconds = 72000 # per solve
+
+# Flow parameters (FlowParameters), the same for every task. The manifest and the solver block
+# are set per task. Any FlowParameters field may be added; unknown keys are rejected.
+[flow]
+sqd_dim = 1_000_000     # subspace size of `job` (a list of sizes: [sweep])
+n_recovery_steps = 5
+n_batches = 1
+quantum_source = "real-device"   # samples once per task, later runs reuse them;
+                                 # "random" = pipeline check without IBM
+random_seed = 24
+seed_cisd = 0
+
+[flow.sampler]
+shots = 10_000
+n_shot_batches = 1
+dynamical_decoupling = true
+dd_sequence = "XY4"
+measure_twirling = true
+gate_twirling = false            # must stay false for LUCJ (IBM error 1519)
+
+[flow.circ_params]
+n_lucj_layers = 1
+use_error_aware_layout = true
+ab_stride = 4
+layout_connectivity = "heavy-hex"
+
+[flow.de_params]
+num_walkers = 1
+iterations = 1
+randomization_factor = 0.2
+fxc = 0.5
+
+# `sweep`: one run per size, all on the task's samples (keep the list on one line)
+[sweep]
+sqd_dims = [100_000, 300_000, 1_000_000]

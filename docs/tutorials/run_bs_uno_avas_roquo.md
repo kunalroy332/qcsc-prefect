@@ -5,7 +5,7 @@ on the unrestricted natural orbitals (UNOs) of a broken-symmetry (BS) solution o
 system. That solution is either a BS-UHF that the plugin computes from a PDB file, or a BS-DFT
 solution read from a Gaussian `.fchk` file. Each run writes one folder with an FCIDUMP, the
 orbital labels, the alpha and beta 1-RDMs of the BS reference, and a **manifest** that ties
-these files together. A consumer, such as an SQD flow, reads only the manifest.
+these files together. The SQD tutorial reads only the manifest.
 
 ```
 .pdb  ─► high-spin UHF ─► BS-UHF per spin pattern ─┐
@@ -23,29 +23,8 @@ The code is the `bs_uno_avas` plugin (`plugins/bs_uno_avas/`). To run it without
 
 ## Prerequisites
 
-- A ROQUO account, a project (account id) and access to the `roquo` partition.
-- Your paths in `~/.qcsc_env`, and a clone of the repository.
-
-On the **login node**, the following block asks for three values and saves them in
-`~/.qcsc_env`. The repository usually lives in your project space, not in `$HOME`. Skip the
-clone if `$REPO` is already a checkout.
-
-```bash
-read -rp "REPO (qcsc-prefect checkout, existing or to clone): " REPO
-read -rp "ACCT (ROQUO account id): " ACCT
-read -rp "RESV (reservation; Enter = none): " RESV
-printf 'export REPO=%q\nexport ACCT=%q\nexport RESV=%q\n' \
-    "$REPO" "$ACCT" "$RESV" > ~/.qcsc_env
-source ~/.qcsc_env; echo "REPO=$REPO ACCT=$ACCT RESV=${RESV:-none}"
-[[ -d $REPO/.git ]] || git clone \
-    https://github.com/qiskit-community/qcsc-prefect.git $REPO
-cd $REPO && git checkout bk/feature/bs-uno-avas && git pull
-```
-
-- `sacctmgr show assoc user=$USER format=account` lists your accounts.
-- `scontrol show reservation` lists the reservations. The scripts use `RESV` only while it is
-  active and tell you when they leave it out.
-- A new shell starts without your variables: start every block with `source ~/.qcsc_env`.
+Complete Steps 1 and 2 of [Set up qcsc-prefect on ROQUO](../howto/howto_setup_qcsc_prefect_roquo.md)
+(`~/.qcsc_env` and the clone). The other steps of that page are needed only for SQD.
 
 ## Set up the gpu4pyscf environment
 
@@ -223,12 +202,24 @@ route adds `_BS_OPT`), so states, geometries, and spin patterns never share a fo
 - `spin_tag` has one digit for each Fe in model order: `0` for alpha (up) and `1` for beta
   (down), for example `10`.
 - Keep each `output/<run>/` folder complete. The manifest checks the sha256 of its files, and
-  a consumer stops on a changed file.
+  SQD stops on a changed file.
 - Use the same manifest for every SQD run of a system. The quantum samples are valid only in its
   orbital basis.
 
-To check a written manifest again from its files, run
-`bs-uno-avas verify --manifest M` (see [Run on another machine](#run-on-another-machine)).
+## Step 5: Hand off to SQD
+
+On the **login node**, `run_bs.sh check` finds every manifest in `workspace/output/`. A short job
+rebuilds the BS-UHF reference of each manifest with the SQD code, and checks Prefect Cloud,
+IBM Quantum&reg;, and the solver:
+
+```bash
+source ~/.qcsc_env; cd $REPO/algorithms/sbd/roquo
+bash run_bs.sh check
+bash run_bs.sh report        # after the job finishes
+```
+
+The line of each manifest must show `tag T -> T (manifest-rdm)`, with `dE` smaller than `1e-4`.
+Then continue with [Run BS-UHF SQD on ROQUO](run_bs_uhf_sqd_roquo.md).
 
 ## Run on another machine
 

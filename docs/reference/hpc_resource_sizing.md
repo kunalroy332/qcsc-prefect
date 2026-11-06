@@ -5,8 +5,8 @@ Davidson-solver job (RHF or UHF) on **Fugaku** or **ROQUO**. It is system-agnost
 then a per-system table. It applies to any molecule — the constraints come from the solver's
 communicator layout, not the chemistry.
 
-See [Run UHF/BS-UHF for Any Molecule](../tutorials/run_uhf_bsuhf_any_molecule.md) for how these
-numbers plug into `create_blocks.py` / the example recovery script.
+See [BS-UHF SQD on ROQUO: advanced usage](../tutorials/run_bs_uhf_sqd_advanced_roquo.md), §4, for how
+these numbers plug into `run_bs.toml` (`[run]` / `[solver]`).
 
 ## The two independent constraints
 

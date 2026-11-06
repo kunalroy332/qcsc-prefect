@@ -4,7 +4,7 @@
 Molecule-agnostic version of the pattern proven on Fe2S2/Fe4S4: sample once, persist the pool,
 then re-diagonalize offline (``quantum_source="saved"``) for many recovery steps with
 checkpoint/resume, on Fugaku, Slurm (e.g. ROQUO), or locally. See README.md for worked examples
-and ``docs/tutorials/run_uhf_bsuhf_any_molecule.md`` for the full tutorial this script backs.
+and ``docs/tutorials/run_bs_uhf_sqd_advanced_roquo.md`` (§1 resume, §7 AF groups).
 
 Prerequisites (same as any other qcsc-prefect flow):
     uv sync   # repo root

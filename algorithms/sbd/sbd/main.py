@@ -202,10 +202,26 @@ def riken_sqd_de(
         getattr(solver, "do_rdm", 0), parameters.de_params.iterations,
     )
 
+    # With an active-space manifest the integrals come from the manifest's FCIDUMP and (UHF) the
+    # broken-symmetry reference is rebuilt from its RDM / spin pattern. The manifest path is
+    # passed (not a loaded spec) so the persisted task inputs stay JSON-serialisable; it is
+    # loaded and validated inside the task (which also warns for method='rhf').
+    if parameters.active_space_manifest:
+        logger.info(
+            "Active-space manifest: %s (fcidump override: %s)",
+            parameters.active_space_manifest, parameters.fcidump or "none",
+        )
     elec_props = compute_molecular_integrals_from_fcidump(
         fcidump_file=parameters.fcidump,
         unrestricted=unrestricted,
+        active_space_manifest=parameters.active_space_manifest,
     )
+    if elec_props.reference_source is not None:
+        logger.info(
+            "Reference: reference_source=%s tag=%s fcidump_sha256=%s norb=%d nelec=%s",
+            elec_props.reference_source, elec_props.reference_tag, elec_props.fcidump_sha256,
+            elec_props.num_orbitals, tuple(elec_props.num_electrons),
+        )
 
     # We assume heavy-hex topology
     # Orbitals for different spins have connections between every 4th orbital.

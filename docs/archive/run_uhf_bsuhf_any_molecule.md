@@ -1,5 +1,7 @@
 # Run UHF / Broken-Symmetry-UHF SQD for Any Molecule (Fugaku + ROQUO)
 
+> **Archived (2026-11-05).** Superseded by [BS-UHF SQD on ROQUO: advanced usage](../tutorials/run_bs_uhf_sqd_advanced_roquo.md) (§1 resume, §7 `AF_GROUPS`). Kept for reference; paths and commands below may be out of date.
+
 The SBD closed-loop pipeline in this repo — `riken_sqd_de`, `FlowParameters`, the broken-symmetry
 UHF guess in `qcsc_workflow_utility.chem` — is molecule-agnostic. Everything you've seen in this
 repo's Fe2S2/Fe4S4 material is one *instance* of that generic pipeline, not a special code path.

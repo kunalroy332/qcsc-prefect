@@ -613,7 +613,7 @@ def rotate_electronic_properties(
     because they are used only to initialize the SQD subspace; the RDMs (occupancies)
     produced by the solver are self-consistently updated each iteration.
     """
-    from qcsc_workflow_utility.chem import ElectronicProperties
+    from qcsc_workflow_utility.chem import ElectronicProperties, reference_fields
 
     if Ub is None:
         Ub = Ua
@@ -657,6 +657,7 @@ def rotate_electronic_properties(
         two_body_tensor_bb=h2_bb_new,
         t2_ab=elec_props.t2_ab,
         t2_bb=elec_props.t2_bb,
+        **reference_fields(elec_props),
     )
 
 

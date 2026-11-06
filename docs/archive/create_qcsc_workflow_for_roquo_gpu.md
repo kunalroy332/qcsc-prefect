@@ -1,5 +1,7 @@
 # Create Your QCSC Workflow with Prefect for ROQUO (GB200 GPU)
 
+> **Archived (2026-11-05).** Superseded by [Set up qcsc-prefect on ROQUO](../howto/howto_setup_qcsc_prefect_roquo.md) and [Run BS-UHF SQD on ROQUO](../tutorials/run_bs_uhf_sqd_roquo.md). Kept for reference; paths and commands below may be out of date.
+
 This hands-on tutorial guides you through running a QCSC (quantum-classical
 self-consistent) SBD workflow on **ROQUO**, the RIKEN R-CCS GB200 (Grace-Hopper
 successor) system with NVIDIA Blackwell GPUs on Arm Neoverse-V2 hosts. It mirrors

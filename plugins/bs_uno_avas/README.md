@@ -2,8 +2,9 @@
 
 A plugin of this repo that stands on its own. It turns a protonated PDB excerpt of an Fe–S
 protein site, or a Gaussian broken-symmetry DFT `.fchk`, into an active-space artifact set and
-a manifest (schema v1), which the BS-UHF SQD flow in `algorithms/sbd` reads
-(`FlowParameters.active_space_manifest`).
+a manifest (schema v1). The BS-UHF SQD flow in `algorithms/sbd` reads that set
+(`FlowParameters.active_space_manifest`; see
+[Run BS-UHF SQD on ROQUO](../../docs/tutorials/run_bs_uhf_sqd_roquo.md)).
 
 ```
 PDB  ─► full-system high-spin UHF ─► BS-UHF per spin pattern ─┐

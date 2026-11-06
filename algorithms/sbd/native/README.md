@@ -132,8 +132,8 @@ SYSLIB="-lblas -llapack" \
 
 **Current recipe (2026-11): `MPI=1 UHF=1 bash build_sbd_gpu.sh`** builds
 `diag-gpu_uhf-mpi-hpcx250` from the same `main.cc` and upstream `native/sbd/` checkout as the
-1-GPU `diag-gpu_uhf`. No cmake, no fork, no hand-applied patches. Check both binaries with
-`sbatch --account=$ACCT smoke_gpu.sh` (one node, 4 GPUs; see its header).
+1-GPU `diag-gpu_uhf`. No cmake, no fork, no hand-applied patches. Steps, paste-ready, and the
+`smoke_gpu.sh` check are in `docs/howto/howto_setup_qcsc_prefect_roquo.md`, Step 4.
 
 - **Source:** upstream `r-ccs-cms/sbd` `main` now has what the fork + patches below provided:
   - NCCL helpers (`framework/nccl_utility.h`, warm-up buffers of length 1);

@@ -6,7 +6,7 @@ Fe-specific defaults. Point it at any FCIDUMP (and, for broken-symmetry UHF, you
 JSON) and a persisted sample pool, and it runs a checkpointed, multi-step SQD recovery on Fugaku,
 Slurm (e.g. ROQUO), or locally.
 
-See [`docs/tutorials/run_uhf_bsuhf_any_molecule.md`](../../docs/tutorials/run_uhf_bsuhf_any_molecule.md)
+See [`docs/tutorials/run_bs_uhf_sqd_advanced_roquo.md`](../../docs/tutorials/run_bs_uhf_sqd_advanced_roquo.md) (§1 resume, §7 AF groups)
 for the full walkthrough (getting an FCIDUMP, building the AF-groups spec, building the solver
 binaries) and [`docs/reference/hpc_resource_sizing.md`](../../docs/reference/hpc_resource_sizing.md)
 for how to choose `--nodes/--ranks-per-node/--omp-threads/--adet/--bdet`.

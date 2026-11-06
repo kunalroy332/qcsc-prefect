@@ -17,6 +17,16 @@ from pydantic import BaseModel
 from pydantic_numpy.helper.annotation import NpArrayPydanticAnnotation
 from pyscf import ao2mo, cc, gto, scf, tools
 
+from .active_space import (
+    ActiveSpaceSpec,
+    atom_spins,
+    bs_density_from_labels,
+    density_from_af_groups,
+    file_sha256,
+    spin_tag_from_spins,
+    validate_orbital_indices,
+)
+
 # Pydantic Types
 NpStrict1DArrayF64 = Annotated[
     np.ndarray[tuple[int,], np.dtype[np.float64]],
@@ -66,6 +76,24 @@ class ElectronicProperties(BaseModel):
     # UCCSD t2 mixed (t2ab) and beta-beta (t2bb) amplitudes; t2aa stays in t2.
     t2_ab: NpStrict4DArrayF64 | None = None
     t2_bb: NpStrict4DArrayF64 | None = None
+
+    # Provenance of a broken-symmetry UHF reference built from an active-space manifest (see
+    # _converge_reference_uhf): converged spin tag ("10", ...), which start won
+    # ("manifest-rdm" / "manifest-labels"), and the FCIDUMP sha256. None for RHF and for UHF
+    # references not built from a manifest.
+    reference_tag: str | None = None
+    reference_source: str | None = None
+    fcidump_sha256: str | None = None
+
+
+# ElectronicProperties fields that describe the reference rather than the integrals; every
+# rebuild of the model (CC refresh, orbital rotation) must carry them over unchanged.
+REFERENCE_FIELDS = ("reference_tag", "reference_source", "fcidump_sha256")
+
+
+def reference_fields(props: ElectronicProperties) -> dict:
+    """The REFERENCE_FIELDS of ``props`` as constructor kwargs."""
+    return {name: getattr(props, name) for name in REFERENCE_FIELDS}
 
 
 def _get_logger():
@@ -127,6 +155,8 @@ def _parse_af_groups() -> dict | None:
         except Exception:
             warnings.warn(f"FE4S4_AF_GROUPS could not be parsed as JSON: {raw!r}; ignoring.")
             return None
+        if not isinstance(spec, dict):
+            raise ValueError(f"FE4S4_AF_GROUPS must be a JSON object or 'fe4s4', got {raw!r}")
     # Optional fractional-polarization + free-bridging-S knobs (apply to any spec).
     try:
         spec["pol"] = float(os.environ.get("FE4S4_AF_POL", "1.0"))
@@ -137,6 +167,25 @@ def _parse_af_groups() -> dict | None:
         if "s" in spec:
             spec["free"] = ["s"]
     return spec
+
+
+def _check_af_groups(af_groups: dict | None, norb: int) -> None:
+    """Bounds-check an FE4S4_AF_GROUPS spec against the FCIDUMP's NORB before any SCF runs.
+
+    The 'fe4s4' preset hard-codes the 36-orbital [Fe4S4(SCH3)4] MO grouping; on any smaller
+    FCIDUMP the guess fill used to die with an uncaught IndexError.
+    """
+    if not af_groups:
+        return
+    try:
+        validate_orbital_indices(af_groups, norb, source="FE4S4_AF_GROUPS")
+    except ValueError as exc:
+        if os.environ.get("FE4S4_AF_GROUPS", "").strip().lower() == "fe4s4":
+            raise ValueError(
+                f"FE4S4_AF_GROUPS preset 'fe4s4' expects 36 orbitals; FCIDUMP has NORB={norb}. "
+                "Use active_space_manifest for AVAS active spaces."
+            ) from exc
+        raise ValueError(f"{exc}. Use active_space_manifest for AVAS active spaces.") from exc
 
 
 def _converge_broken_symmetry_uhf(mf, max_follow: int = 5, af_groups: dict | None = None):
@@ -251,9 +300,6 @@ def _converge_broken_symmetry_uhf(mf, max_follow: int = 5, af_groups: dict | Non
         # fragments (doubly occupied) are everything else. We stability-follow (external) and keep
         # the lowest across all guesses.
         if af_groups:
-            up = set(af_groups.get("up", []))
-            down = set(af_groups.get("down", []))
-            free = set(af_groups.get("free", []))  # fragments left half-filled (unpolarized)
             # Fractional polarization amplitude p in [0,1]: p=1 -> full 1.0/0.0 spin split on the
             # magnetic centers (maximally localized, large <S^2>); p<1 -> 0.5(1+/-p) split, letting
             # the sublattices couple more (SMALLER <S^2>, closer to the physical super-exchange
@@ -261,24 +307,9 @@ def _converge_broken_symmetry_uhf(mf, max_follow: int = 5, af_groups: dict | Non
             # orbitals -- so "free" fragments (the bridging S) are seeded half-filled to MEDIATE that
             # exchange rather than being forced doubly-occupied. Local sweep: p=0.6 + free bridging S
             # gives the deepest BS-UCCSD (-327.143 vs -327.102 at p=1.0) and lowest <S^2>.
-            pol = af_groups.get("pol", 1.0)
-            frags = {
-                k: v for k, v in af_groups.items()
-                if k not in ("up", "down", "free", "pol")
-            }
-            dm0 = np.zeros((2, n, n))
-            for name, orbs in frags.items():
-                for x in orbs:
-                    if name in up:
-                        dm0[0, x, x] = 0.5 + 0.5 * pol
-                        dm0[1, x, x] = 0.5 - 0.5 * pol
-                    elif name in down:
-                        dm0[0, x, x] = 0.5 - 0.5 * pol
-                        dm0[1, x, x] = 0.5 + 0.5 * pol
-                    elif name in free:  # bridging exchange mediator: half-filled, unpolarized
-                        dm0[:, x, x] = 0.5
-                    else:  # closed fragment: doubly occupied
-                        dm0[:, x, x] = 1.0
+            # The fill (up/down 0.5 +/- 0.5*pol, free 0.5/0.5, other fragments doubly occupied)
+            # lives in active_space.density_from_af_groups, which bounds-checks the indices first.
+            dm0 = density_from_af_groups(af_groups, n)
             m = scf.UHF(base_mol)
             if base_hcore is not None:
                 m.get_hcore = lambda *a, **k: base_hcore
@@ -301,6 +332,10 @@ def _converge_broken_symmetry_uhf(mf, max_follow: int = 5, af_groups: dict | Non
             except Exception:
                 pass
         return best
+
+    # Fail fast on an af_groups spec that does not fit this Hamiltonian (e.g. the 36-orbital
+    # 'fe4s4' preset on a 16-orbital AVAS FCIDUMP), before any SCF work.
+    _check_af_groups(af_groups, mf.mol.nao)
 
     # Capture the mol + any FCIDUMP integral overrides from the ORIGINAL mf before newton-wrapping,
     # so the AF-guess UHF can be rebuilt as a plain scf.UHF with the same Hamiltonian.
@@ -365,6 +400,319 @@ def _converge_broken_symmetry_uhf(mf, max_follow: int = 5, af_groups: dict | Non
             stacklevel=2,
         )
     return mf
+
+
+def _uhf_factory(mf):
+    """Return a callable building fresh plain ``scf.UHF`` objects on ``mf``'s Hamiltonian.
+
+    Carries the FCIDUMP integral overrides (hcore / ovlp / _eri / nuclear energy). A fresh object
+    per SCF avoids aliasing: ``newton()`` on an already second-order object returns ``self``, so
+    re-running it would overwrite an earlier solution kept for comparison.
+    """
+    base_mol = mf.mol
+    hcore, ovlp, eri = mf.get_hcore(), mf.get_ovlp(), mf._eri
+    nuc = float(mf.mol.energy_nuc())
+
+    def make():
+        m = scf.UHF(base_mol)
+        m.get_hcore = lambda *a, **k: hcore
+        m.get_ovlp = lambda *a, **k: ovlp
+        m._eri = eri
+        m.mol.energy_nuc = lambda *a: nuc
+        m.max_cycle = 400
+        m.conv_tol = 1e-9
+        return m
+
+    return make
+
+
+def _converge_from_density(make_uhf, dm0, max_follow: int = 10):
+    """Second-order UHF from ``dm0``, then follow internal instabilities; keep the lowest.
+
+    Each follow step re-converges a fresh object from the density of the lowest internal
+    instability mode (the ``bs_uno_avas.verify.active_uhf`` recipe). External (UHF -> GHF) instabilities
+    cannot be followed within UHF and are not checked.
+    """
+    from pyscf import lib
+
+    m = make_uhf().newton()
+    m.kernel(dm0=(np.asarray(dm0[0]), np.asarray(dm0[1])))
+    best, stable = m, False
+    for _ in range(max_follow):
+        try:
+            mo_i, _, stable_i, _ = m.stability(return_status=True)
+        except lib.exceptions.LinearDependencyError:
+            break  # no stability analysis possible (e.g. no open shells)
+        if stable_i:
+            stable = True
+            break
+        nxt = make_uhf().newton()
+        nxt.kernel(dm0=m.make_rdm1(mo_i, m.mo_occ))
+        m = nxt
+        if m.e_tot < best.e_tot:
+            best = m
+    return best, stable
+
+
+def _strict_bs() -> bool:
+    return os.environ.get("SBD_BS_STRICT", "0") == "1"
+
+
+def _bs_problem(msg: str, logger) -> None:
+    """Warn (default) or raise (``SBD_BS_STRICT=1``) on a reference that deviates from the
+    manifest."""
+    if _strict_bs():
+        raise RuntimeError(f"{msg} (SBD_BS_STRICT=1)")
+    logger.warning(msg)
+    warnings.warn(msg, RuntimeWarning, stacklevel=3)
+
+
+def _converge_reference_uhf(mf, spec: ActiveSpaceSpec, logger=None):
+    """Reproduce the manifest's broken-symmetry UHF on the FCIDUMP Hamiltonian of ``mf``.
+
+    Two starts: (a) the manifest alpha/beta 1-RDM, (b) the label-based guess for
+    ``spec.spin_pattern`` (Fe 3d in alpha/beta, S 3p doubly occupied). Each is converged with a
+    second-order solver plus internal stability following. Among the converged solutions whose
+    spin tag equals ``spec.spin_tag`` the lowest energy wins (the RDM start on a tie,
+    |dE| <= 1e-6). If none matches, the lowest converged solution is used with a loud warning.
+    Energy is compared with ``spec.e_active_uhf`` (tolerance ``SBD_BS_E_TOL``, default 1e-4 Eh).
+    ``SBD_BS_STRICT=1`` turns tag / energy / convergence mismatches into ``RuntimeError``.
+
+    No energy-ordered or ``FE4S4_AF_GROUPS`` guess is tried: the reference must be the
+    manifest's state.
+
+    Returns ``(uhf, info)``: a plain converged ``scf.UHF`` carrying the chosen solution and a dict
+    with ``energy, tag, source, s2, atom_spins, stable`` plus per-start ``candidates``.
+    """
+    logger = logger or _get_logger()
+    labels = spec.labels.tolist()
+    if tuple(mf.mol.nelec) != (spec.nalpha, spec.nbeta):
+        raise ValueError(
+            f"FCIDUMP gives (n_alpha, n_beta)={tuple(mf.mol.nelec)} but the manifest "
+            f"{spec.manifest_path} gives ({spec.nalpha}, {spec.nbeta})"
+        )
+    if mf.mol.nao != spec.norb:
+        raise ValueError(f"FCIDUMP has {mf.mol.nao} orbitals, manifest NORB={spec.norb}")
+
+    make_uhf = _uhf_factory(mf)
+    starts = (
+        ("manifest-rdm", spec.rdm),
+        ("manifest-labels", bs_density_from_labels(labels, spec.spin_pattern)),
+    )
+    candidates = []
+    for source, dm0 in starts:
+        m, stable = _converge_from_density(make_uhf, dm0)
+        dm_a, dm_b = m.make_rdm1()
+        spins = atom_spins(dm_a, dm_b, labels)
+        cand = {
+            "source": source,
+            "energy": float(m.e_tot),
+            "tag": spin_tag_from_spins(spins),
+            "s2": float(m.spin_square()[0]),
+            "atom_spins": spins,
+            "converged": bool(m.converged),
+            "stable": stable,
+            "mf": m,
+        }
+        candidates.append(cand)
+        logger.info(
+            "BS-UHF reference start %s: E=%.8f tag=%s <S^2>=%.4f converged=%s stable=%s",
+            source, cand["energy"], cand["tag"], cand["s2"], cand["converged"], stable,
+        )
+
+    def pick(pool):
+        # lowest energy; candidates within 1e-6 Eh of it keep start order (RDM first)
+        e_min = min(c["energy"] for c in pool)
+        return next(c for c in pool if c["energy"] <= e_min + 1e-6)
+
+    converged = [c for c in candidates if c["converged"]]
+    matching = [c for c in converged if c["tag"] == spec.spin_tag]
+    summary = ", ".join(f"{c['source']}: E={c['energy']:.8f} tag={c['tag']}" for c in candidates)
+    if matching:
+        best = pick(matching)
+    else:
+        best = pick(converged or candidates)
+        _bs_problem(
+            f"No converged BS-UHF start reproduced the manifest spin tag {spec.spin_tag!r} "
+            f"({summary}); using {best['source']} (tag {best['tag']!r}).",
+            logger,
+        )
+    if not best["converged"]:
+        _bs_problem(f"BS-UHF reference from {best['source']} did not converge.", logger)
+
+    e_tol = float(os.environ.get("SBD_BS_E_TOL", "1e-4"))
+    if spec.e_active_uhf is not None and abs(best["energy"] - spec.e_active_uhf) > e_tol:
+        _bs_problem(
+            f"BS-UHF reference E={best['energy']:.8f} differs from manifest e_active_uhf="
+            f"{spec.e_active_uhf:.8f} by {best['energy'] - spec.e_active_uhf:+.2e} Eh "
+            f"(> SBD_BS_E_TOL={e_tol:g}).",
+            logger,
+        )
+
+    spins_txt = " ".join(f"{k}={v:+.3f}" for k, v in best["atom_spins"].items())
+    logger.info(
+        "BS-UHF reference: reference_source=%s tag=%s (manifest %s) E=%.8f <S^2>=%.4f "
+        "atom spins: %s",
+        best["source"], best["tag"], spec.spin_tag, best["energy"], best["s2"], spins_txt,
+    )
+
+    # Hand back a plain UHF (not the second-order wrapper) carrying the chosen solution, as the
+    # cache-reuse path does.
+    chosen = best["mf"]
+    out = make_uhf()
+    out.mo_coeff = tuple(np.asarray(c) for c in chosen.mo_coeff)
+    out.mo_occ = tuple(np.asarray(o) for o in chosen.mo_occ)
+    out.mo_energy = tuple(np.asarray(e) for e in chosen.mo_energy)
+    out.e_tot = float(chosen.e_tot)
+    out.converged = bool(chosen.converged)
+    info = {k: v for k, v in best.items() if k != "mf"}
+    info["candidates"] = [{k: v for k, v in c.items() if k != "mf"} for c in candidates]
+    return out, info
+
+
+def _fcidump_uhf(mf, nuc: float):
+    """Plain (non-symmetry-adapted) ``scf.UHF`` on the FCIDUMP Hamiltonian carried by the RHF
+    shell ``mf`` from ``tools.fcidump.to_scf`` (see the Audit P3 note at the call site)."""
+    base_mol = mf.mol
+    if getattr(base_mol, "symmetry", False):
+        base_mol.symmetry = False
+        base_mol.build(dump_input=False, parse_arg=False)
+    hcore = mf.get_hcore()
+    ovlp = mf.get_ovlp()
+    eri = mf._eri
+    out = scf.UHF(base_mol)
+    out.get_hcore = lambda *args, **kwargs: hcore
+    out.get_ovlp = lambda *args, **kwargs: ovlp
+    out._eri = eri
+    out.mol.energy_nuc = lambda *args: nuc  # preserved across the conversion
+    out.symmetry = False
+    return out
+
+
+def manifest_reference_summary(active_space_manifest: str, fcidump_file: str | None = None):
+    """Load a manifest and rebuild its BS-UHF reference exactly as the flow does, without UCCSD.
+
+    For launcher dry-runs / pre-flight checks. Returns ``(spec, info)`` where ``info`` is the
+    ``_converge_reference_uhf`` dict (energy, tag, source, s2, atom_spins, candidates). Honours
+    ``SBD_BS_STRICT`` / ``SBD_BS_E_TOL`` like the flow. Does not read or write the UHF cache.
+    """
+    from contextlib import redirect_stdout
+
+    from .active_space import load_active_space_manifest
+
+    spec = load_active_space_manifest(active_space_manifest, fcidump_override=fcidump_file)
+    with redirect_stdout(io.StringIO()):  # pyscf prints "Parsing <file>"
+        shell = tools.fcidump.to_scf(str(spec.fcidump))
+    shell.mol.verbose = 0
+    _, info = _converge_reference_uhf(_fcidump_uhf(shell, shell.mol.energy_nuc()), spec)
+    return spec, info
+
+
+# --------------------------------------------------------------------------------------------
+# UHF reference cache (SBD_UHF_CACHE / SBD_UHF_CACHE_DIR)
+# --------------------------------------------------------------------------------------------
+
+# Bump when the cached content or key recipe changes.
+_UHF_CACHE_VERSION = "v2"
+
+
+def _uhf_cache_path(cache_dir: str, fcidump_sha256: str, guess_token: str, nelec) -> str:
+    """Content-based cache file: FCIDUMP sha256 + guess token + (n_alpha, n_beta).
+
+    The FCIDUMP path is deliberately not part of the key: the same file copied elsewhere hits,
+    a regenerated file at the same path misses.
+    """
+    import hashlib
+
+    nelec_txt = "nelec=" + str(tuple(int(n) for n in nelec))
+    raw = "|".join([_UHF_CACHE_VERSION, fcidump_sha256, guess_token, nelec_txt])
+    key = hashlib.sha1(raw.encode(), usedforsecurity=False).hexdigest()[:16]
+    return os.path.join(cache_dir, f"uhf_bs_{key}.npz")
+
+
+def _uhf_cache_load(cpath: str, mf, norb: int) -> bool:
+    """Load a cached reference into ``mf`` (mo_coeff / mo_occ / mo_energy / e_tot). Returns
+    False (and leaves ``mf`` untouched) if absent, unreadable, or inconsistent with ``mf``."""
+    if not os.path.exists(cpath):
+        return False
+    try:
+        with np.load(cpath, allow_pickle=False) as c:
+            data = {k: c[k] for k in c.files}
+        nelec = tuple(int(n) for n in data["nelec"])
+        shapes_ok = all(data[k].shape == (norb, norb) for k in ("mo_a", "mo_b"))
+        occ = (int(round(data["occ_a"].sum())), int(round(data["occ_b"].sum())))
+    except Exception as exc:
+        print(f"[uhf-cache] ignoring unreadable cache {cpath}: {exc}")
+        return False
+    if nelec != tuple(mf.mol.nelec) or occ != nelec or not shapes_ok:
+        print(
+            f"[uhf-cache] ignoring {cpath}: cached nelec={nelec} occ={occ} norb ok={shapes_ok} "
+            f"do not match nelec={tuple(mf.mol.nelec)} norb={norb}"
+        )
+        return False
+    mf.mo_coeff = (data["mo_a"], data["mo_b"])
+    mf.mo_occ = (data["occ_a"], data["occ_b"])
+    mf.mo_energy = (data["ene_a"], data["ene_b"])
+    mf.e_tot = float(data["e_tot"])
+    mf.converged = True
+    tag = f" tag={data['tag']}" if "tag" in data else ""
+    print(f"[uhf-cache] reuse BS-UHF reference {cpath} (E={mf.e_tot:.6f}{tag})")
+    return True
+
+
+def _uhf_cache_save(cpath: str, mf, *, tag: str | None = None, source: str | None = None) -> None:
+    """Write the converged reference atomically (tmp file + rename); failures only warn."""
+    try:
+        os.makedirs(os.path.dirname(cpath), exist_ok=True)
+        mo_a, mo_b = mf.mo_coeff
+        occ_a, occ_b = mf.mo_occ
+        ene_a, ene_b = mf.mo_energy
+        extra = {k: np.array(v) for k, v in (("tag", tag), ("source", source)) if v is not None}
+        tmp = f"{cpath}.{os.getpid()}.tmp"
+        with open(tmp, "wb") as f:
+            np.savez(
+                f, mo_a=mo_a, mo_b=mo_b, occ_a=occ_a, occ_b=occ_b, ene_a=ene_a, ene_b=ene_b,
+                e_tot=float(mf.e_tot), nelec=np.array(mf.mol.nelec), **extra,
+            )
+        os.replace(tmp, cpath)
+        print(f"[uhf-cache] saved BS-UHF reference {cpath} (E={mf.e_tot:.6f})")
+    except Exception as exc:
+        print(f"[uhf-cache] save failed (continuing): {exc}")
+
+
+def _check_cached_reference(mf, spec: ActiveSpaceSpec, cpath: str, logger=None) -> dict | None:
+    """Re-validate a cached manifest reference loaded into ``mf``.
+
+    The tag is recomputed from the cached orbitals (not trusted from the file). A reference that
+    does not match the manifest tag / energy is not served from the cache: returns None so the
+    caller re-converges (and emits the usual warnings / SBD_BS_STRICT errors).
+    """
+    logger = logger or _get_logger()
+    labels = spec.labels.tolist()
+    dm_a, dm_b = mf.make_rdm1()
+    spins = atom_spins(dm_a, dm_b, labels)
+    tag = spin_tag_from_spins(spins)
+    e_tol = float(os.environ.get("SBD_BS_E_TOL", "1e-4"))
+    e_ok = spec.e_active_uhf is None or abs(mf.e_tot - spec.e_active_uhf) <= e_tol
+    if tag != spec.spin_tag or not e_ok:
+        logger.warning(
+            "[uhf-cache] cached reference %s has tag=%s E=%.8f (manifest tag=%s E=%s); "
+            "re-converging instead of reusing it.",
+            cpath, tag, mf.e_tot, spec.spin_tag, spec.e_active_uhf,
+        )
+        return None
+    try:
+        with np.load(cpath, allow_pickle=False) as c:
+            source = str(c["source"]) if "source" in c.files else "manifest-cache"
+    except Exception:
+        source = "manifest-cache"
+    spins_txt = " ".join(f"{k}={v:+.3f}" for k, v in spins.items())
+    logger.info(
+        "BS-UHF reference (cached %s): reference_source=%s tag=%s (manifest %s) E=%.8f "
+        "atom spins: %s",
+        cpath, source, tag, spec.spin_tag, mf.e_tot, spins_txt,
+    )
+    return {"tag": tag, "source": source, "energy": float(mf.e_tot), "atom_spins": spins}
 
 
 def _build_property(
@@ -433,6 +781,7 @@ def _build_property_uhf(
     norb: int,
     spin_sq: float,
     buf: io.StringIO,
+    reference: dict | None = None,
 ) -> ElectronicProperties:
     """Build ElectronicProperties from an unrestricted (UHF) calculation.
 
@@ -446,6 +795,7 @@ def _build_property_uhf(
         norb: Number of (spatial) orbitals.
         spin_sq: Target value for the total spin squared.
         buf: StringIO buffer containing PySCF logs.
+        reference: Optional REFERENCE_FIELDS values (manifest-built BS reference).
 
     Returns:
         ElectronicProperties object with ``unrestricted=True``.
@@ -521,6 +871,7 @@ def _build_property_uhf(
         open_shell=num_elec_a != num_elec_b,
         unrestricted=True,
         spin_sq=spin_sq,
+        **(reference or {}),
     )
 
     # Opt-in initial orbital optimization: BS-UHF -> UCCSD -> OO -> UCCSD refresh.
@@ -676,17 +1027,24 @@ def compute_molecular_integrals_from_geometry(
     name="compute_molecular_integrals",
 )
 def compute_molecular_integrals_from_fcidump(
-    fcidump_file: str,
+    fcidump_file: str | None,
     spin_sq: float = 0.0,
     unrestricted: bool = False,
+    active_space_manifest: str | None = None,
 ) -> ElectronicProperties:
     """Precompute molecular orbital property from FCIDump file with classical methods.
 
     Args:
         fcidump_file: Location of FCIDump file storing 1-electron and 2-electron integrals.
+            May be None when ``active_space_manifest`` is given (the manifest's FCIDUMP is used);
+            if both are given the file must be byte-identical to the manifest's FCIDUMP.
         spin_sq: Target value for the total spin squared for the ground state.
         unrestricted: Run an unrestricted (UHF) calculation instead of restricted (RHF). The
             number of unpaired electrons is taken from the FCIDUMP ``MS2`` header.
+        active_space_manifest: Path to an AVAS active-space manifest (schema v1, see
+            ``active_space.load_active_space_manifest``). With UHF the broken-symmetry reference
+            is rebuilt from the manifest RDM / spin pattern (``_converge_reference_uhf``) instead
+            of the default / FE4S4_AF_GROUPS guesses. With RHF it only supplies the FCIDUMP.
 
     Returns:
         ElectronicProperties object containing molecular integrals and properties.
@@ -696,6 +1054,24 @@ def compute_molecular_integrals_from_fcidump(
     # To forward the logs to the Prefect logging sytem,
     # we set an in-memory buffer to the PySCF logging system and read from there.
     buf = io.StringIO()
+
+    spec = None
+    if active_space_manifest:
+        from .active_space import load_active_space_manifest
+
+        spec = load_active_space_manifest(active_space_manifest, fcidump_override=fcidump_file)
+        fcidump_file = str(spec.fcidump)
+        if not unrestricted:
+            msg = (
+                f"active_space_manifest {active_space_manifest} is ignored for RHF except for "
+                "its FCIDUMP; the broken-symmetry reference needs method='uhf'."
+            )
+            _get_logger().warning(msg)
+            warnings.warn(msg, RuntimeWarning, stacklevel=2)
+    elif fcidump_file is None:
+        raise ValueError(
+            "compute_molecular_integrals_from_fcidump needs fcidump_file or a manifest"
+        )
 
     data = tools.fcidump.read(fcidump_file)
     norb = data["NORB"]
@@ -722,50 +1098,47 @@ def compute_molecular_integrals_from_fcidump(
         # whose build() still demands mol.symmetry even after we clear the flag. So disable symmetry
         # on the mol, rebuild it, and construct a PLAIN scf.UHF on it (not mf.to_uhf()); carry the
         # FCIDUMP integral overrides (get_hcore/_eri) + nuclear energy across by hand.
-        base_mol = mf.mol
-        if getattr(base_mol, "symmetry", False):
-            base_mol.symmetry = False
-            base_mol.build(dump_input=False, parse_arg=False)
-        hcore = mf.get_hcore()
-        ovlp = mf.get_ovlp()
-        eri = mf._eri
-        mf = scf.UHF(base_mol)
-        mf.get_hcore = lambda *args, **kwargs: hcore
-        mf.get_ovlp = lambda *args, **kwargs: ovlp
-        mf._eri = eri
-        mf.mol.energy_nuc = lambda *args: nuc  # preserved across the conversion
-        mf.symmetry = False
+        mf = _fcidump_uhf(mf, nuc)
+        # Deterministic broken-symmetry reference: cache converged UHF MOs so every run
+        # (do_rdm on/off, OO on/off, sample vs recovery) starts from the IDENTICAL reference.
+        # Fe4S4's 400-cycle SCF is thread/BLAS-order sensitive -> different BS local minima
+        # run-to-run otherwise. The key is content-based (FCIDUMP sha256 + guess token + nelec), so
+        # a regenerated FCIDUMP at the same path is never served a stale reference.
+        # SBD_UHF_CACHE=0 skips the lookup (the fresh result still refreshes the cache file);
+        # relocate with SBD_UHF_CACHE_DIR.
+        cache_dir = os.environ.get("SBD_UHF_CACHE_DIR", os.path.expanduser("~/.cache/qcsc_uhf"))
+        cache_read = os.environ.get("SBD_UHF_CACHE", "1") != "0"
+        if spec is not None:
+            # Manifest: reproduce the manifest's BS state (RDM start, label start as fallback and
+            # check); no default / FE4S4_AF_GROUPS guesses.
+            cpath = _uhf_cache_path(
+                cache_dir, spec.fcidump_sha256, "manifest=" + spec.cache_token, mf.mol.nelec
+            )
+            ref = None
+            if cache_read and _uhf_cache_load(cpath, mf, norb):
+                ref = _check_cached_reference(mf, spec, cpath)
+            if ref is None:
+                mf, ref = _converge_reference_uhf(mf, spec)
+                _uhf_cache_save(cpath, mf, tag=ref["tag"], source=ref["source"])
+            reference = {
+                "reference_tag": ref["tag"],
+                "reference_source": ref["source"],
+                "fcidump_sha256": spec.fcidump_sha256,
+            }
+            return _build_property_uhf(mf, norb, spin_sq, buf, reference=reference)
         # Follow any spin instability to the genuine (broken-symmetry) UHF minimum -- otherwise a
         # singlet stays at the RHF solution and the "UHF" reference/UCCSD/t2 seed is restricted.
         # For Fe-S cubanes, an atom-localized (Noodleman) AF guess -- supplied via FE4S4_AF_GROUPS --
         # reaches a ~33 mHa lower BS basin than the energy-ordered guess (better Fe-3d orbitals for
         # SQD to recover on). See _parse_af_groups; unset -> plain energy-ordered AF guess (default).
-        # Deterministic broken-symmetry reference: cache converged UHF MOs so every run
-        # (do_rdm on/off, OO on/off) starts from the IDENTICAL reference. Fe4S4's 400-cycle SCF is
-        # thread/BLAS-order sensitive -> different BS local minima run-to-run otherwise.
-        # Disable with SBD_UHF_CACHE=0; relocate with SBD_UHF_CACHE_DIR.
-        import hashlib as _hl, os as _os
-        _cdir = _os.environ.get("SBD_UHF_CACHE_DIR", _os.path.expanduser("~/.cache/qcsc_uhf"))
-        _key = _hl.sha1((_os.path.abspath(fcidump_file) + "|af=" + str(_parse_af_groups())
-                         + "|nelec=" + str(tuple(mf.mol.nelec))).encode()).hexdigest()[:16]
-        _cpath = _os.path.join(_cdir, f"uhf_bs_{_key}.npz")
-        if _os.environ.get("SBD_UHF_CACHE", "1") != "0" and _os.path.exists(_cpath):
-            _c = np.load(_cpath)
-            mf.mo_coeff = (_c["mo_a"], _c["mo_b"])
-            mf.mo_occ = (_c["occ_a"], _c["occ_b"])
-            mf.mo_energy = (_c["ene_a"], _c["ene_b"])
-            mf.e_tot = float(_c["e_tot"]); mf.converged = True
-            print(f"[uhf-cache] reuse BS-UHF reference {_cpath} (E={mf.e_tot:.6f})")
-        else:
-            mf = _converge_broken_symmetry_uhf(mf, af_groups=_parse_af_groups())
-            try:
-                _os.makedirs(_cdir, exist_ok=True)
-                _moa, _mob = mf.mo_coeff; _oca, _ocb = mf.mo_occ; _ena, _enb = mf.mo_energy
-                np.savez(_cpath, mo_a=_moa, mo_b=_mob, occ_a=_oca, occ_b=_ocb,
-                         ene_a=_ena, ene_b=_enb, e_tot=float(mf.e_tot))
-                print(f"[uhf-cache] saved BS-UHF reference {_cpath} (E={mf.e_tot:.6f})")
-            except Exception as _e:
-                print(f"[uhf-cache] save failed (continuing): {_e}")
+        _af_groups = _parse_af_groups()
+        _check_af_groups(_af_groups, norb)  # before the cache lookup: clear error, not IndexError
+        cpath = _uhf_cache_path(
+            cache_dir, file_sha256(fcidump_file), "af=" + str(_af_groups), mf.mol.nelec
+        )
+        if not (cache_read and _uhf_cache_load(cpath, mf, norb)):
+            mf = _converge_broken_symmetry_uhf(mf, af_groups=_af_groups)
+            _uhf_cache_save(cpath, mf)
         return _build_property_uhf(mf, norb, spin_sq, buf)
 
     # Run HF calculation with Newton method.
@@ -898,6 +1271,7 @@ def _refresh_cc_seed_rhf(
         num_electrons=elec_props.num_electrons,
         open_shell=elec_props.open_shell,
         spin_sq=elec_props.spin_sq,
+        **reference_fields(elec_props),
     )
     return (props, float(mycc.e_tot)) if return_energy else props
 
@@ -1090,6 +1464,7 @@ def _refresh_cc_seed_uhf(
         open_shell=elec_props.open_shell,
         unrestricted=True,
         spin_sq=elec_props.spin_sq,
+        **reference_fields(elec_props),
     )
     return (props, float(mycc.e_tot)) if return_energy else props
 

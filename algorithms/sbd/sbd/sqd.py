@@ -22,7 +22,7 @@ from qiskit_addon_sqd.configuration_recovery import (
 )
 from qiskit_addon_sqd.counts import bit_array_to_arrays, generate_bit_array_uniform
 
-from .data_io import load_ndarray, save_ndarray
+from .data_io import load_ndarray, load_ndarray_optional, save_ndarray
 from .flow_params import CircuitParameters, SamplerParameters
 from .lucj import create_lucj_circuit
 from .np_type_extension import (
@@ -281,6 +281,84 @@ def _excitation_summary(ci_strings: np.ndarray, num_elec: int) -> str:
     )
 
 
+def _reference_telemetry(elec_props: ElectronicProperties) -> dict:
+    """Which Hamiltonian / reference a telemetry record belongs to. reference_* and
+    fcidump_sha256 are None unless the reference was built from an active-space manifest."""
+    return {
+        "norb": int(elec_props.num_orbitals),
+        "nelec": [int(n) for n in elec_props.num_electrons],
+        "reference_tag": getattr(elec_props, "reference_tag", None),
+        "reference_source": getattr(elec_props, "reference_source", None),
+        "fcidump_sha256": getattr(elec_props, "fcidump_sha256", None),
+    }
+
+
+# Fields of a persisted sample pool's reference record. The bitstrings live in the MO basis of
+# the reference they were sampled from, so a pool is only valid for the same Hamiltonian
+# (fcidump_sha256), sector (norb, nelec), reference state (reference_tag) and method.
+_POOL_META_KEYS = ("norb", "nelec", "fcidump_sha256", "reference_tag", "method")
+
+
+def _pool_ref_meta(elec_props: ElectronicProperties) -> dict:
+    row = _reference_telemetry(elec_props)
+    row["method"] = "uhf" if getattr(elec_props, "unrestricted", False) else "rhf"
+    return {k: row[k] for k in _POOL_META_KEYS}
+
+
+def _pool_ref_meta_array(elec_props: ElectronicProperties) -> np.ndarray:
+    """Reference record as a 1-element fixed-width unicode array (``allow_pickle=False`` npz
+    cannot hold object arrays)."""
+    return np.array([json.dumps(_pool_ref_meta(elec_props), sort_keys=True)], dtype="<U2048")
+
+
+def _check_saved_pool(pool_path, num_bits, ref_meta, elec_props, logger) -> None:
+    """Refuse a saved pool that does not belong to the current reference.
+
+    ``num_bits != 2*norb`` always raises. A pool with a reference record whose norb / nelec /
+    fcidump_sha256 / reference_tag / method differs from the current one raises unless
+    ``SBD_ALLOW_POOL_MISMATCH=1`` (then warns). Pools written before the record existed are
+    accepted with a warning (only the bit count can be checked). A None on either side of
+    fcidump_sha256 / reference_tag (legacy run) is not treated as a mismatch.
+    """
+    norb = int(elec_props.num_orbitals)
+    if num_bits != 2 * norb:
+        raise ValueError(
+            f"saved pool {pool_path} has num_bits={num_bits}, but the current Hamiltonian needs "
+            f"2*norb = {2 * norb} (NORB={norb}). The pool was sampled for a different active "
+            "space; point saved_samples at the pool of this run."
+        )
+    if ref_meta is None:
+        logger.warning(
+            "[saved] pool %s has no reference record (written before ref_meta existed); only "
+            "num_bits=%d was checked. Make sure it was sampled with this FCIDUMP and reference.",
+            pool_path, num_bits,
+        )
+        return
+    try:
+        saved = json.loads(str(np.asarray(ref_meta).reshape(-1)[0]))
+    except Exception as exc:
+        raise ValueError(f"saved pool {pool_path}: unreadable ref_meta ({exc})") from exc
+    current = _pool_ref_meta(elec_props)
+    diffs = []
+    for key in _POOL_META_KEYS:
+        a, b = saved.get(key), current[key]
+        if key in ("fcidump_sha256", "reference_tag") and (a is None or b is None):
+            continue
+        if a != b:
+            diffs.append(f"{key}: pool={a!r} current={b!r}")
+    if not diffs:
+        logger.info("[saved] pool %s matches the current reference (%s)", pool_path, current)
+        return
+    msg = (
+        f"saved pool {pool_path} was sampled for a different reference ({'; '.join(diffs)}). "
+        "The bitstrings live in that reference's MO basis."
+    )
+    if os.environ.get("SBD_ALLOW_POOL_MISMATCH", "0") == "1":
+        logger.warning("%s Continuing because SBD_ALLOW_POOL_MISMATCH=1.", msg)
+        return
+    raise ValueError(f"{msg} Set SBD_ALLOW_POOL_MISMATCH=1 to use it anyway.")
+
+
 @task(
     task_run_name="run_sqd_#{trial_index:02d}-{walker_index}",
 )
@@ -331,6 +409,7 @@ def walker_sqd(
     telemetry = {
         "trial_index": trial_index,
         "walker_index": walker_index,
+        **_reference_telemetry(elec_props),
     }
 
     # Sampling options come from FlowParameters.sampler (formerly the Prefect Variable sqd_options).
@@ -517,6 +596,7 @@ def walker_sqd(
                 packed_bits=bit_array.array,
                 num_bits=np.array([bit_array.num_bits], dtype=np.int64),
                 num_shots=np.array([bit_array.num_shots], dtype=np.int64),
+                ref_meta=_pool_ref_meta_array(elec_props),
             )
             telemetry["raw_samples_path"] = pool_path
             logger.info(
@@ -545,6 +625,9 @@ def walker_sqd(
         logger.info("Loading saved sample pool for walker %d: %s", walker_index, pool_path)
         packed = load_ndarray(pool_path, "packed_bits")
         num_bits = int(load_ndarray(pool_path, "num_bits")[0])
+        _check_saved_pool(
+            pool_path, num_bits, load_ndarray_optional(pool_path, "ref_meta"), elec_props, logger
+        )
         bit_array = BitArray(packed, num_bits)
         logger.info(
             "[saved] loaded %d-shot pool (%d bits) from %s",

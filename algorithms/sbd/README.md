@@ -146,7 +146,13 @@ Note:
 - These are conservative starting points only. Tune them for your own backend, qubit count, and circuit specification.
 - Set `"quantum_source": "random"` in the JSON if you want to skip IBM Quantum Runtime and use deterministic pseudo-random bitstrings instead. `"random_seed"` controls reproducibility in that mode.
 - Shots and error mitigation: `"sampler": {"shots": 50000, "dynamical_decoupling": true, "measure_twirling": true}`.
-- `FlowParameters` rejects unknown keys.
+
+BS-UHF from an AVAS active-space manifest (Fe2S2 / Fe4S4 excerpts; solver block with
+`--method uhf`): set `"active_space_manifest"` instead of `"fcidump"`, see
+`default_params/bs_fe2s2_manifest.example.json`, the tutorial
+[`docs/tutorials/run_bs_uhf_sqd_roquo.md`](../../docs/tutorials/run_bs_uhf_sqd_roquo.md)
+and the ROQUO launcher in [`roquo/`](roquo/README.md). Note that `FlowParameters` rejects unknown
+keys.
 
 Deploy entrypoint:
 

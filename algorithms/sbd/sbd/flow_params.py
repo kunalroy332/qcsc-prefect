@@ -4,7 +4,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Unknown keys are rejected (not silently dropped): a misspelled or unsupported option in a params
 # JSON / launcher must fail at validation instead of running with the default.
@@ -274,9 +274,28 @@ class FlowParameters(BaseModel):
 
     model_config = _STRICT
 
-    fcidump: str = Field(
-        description="A path to pySCF FCIDump file of the target molecule.",
+    fcidump: str | None = Field(
+        default=None,
+        description=(
+            "A path to pySCF FCIDump file of the target molecule. Optional when "
+            "active_space_manifest is given (the manifest's FCIDUMP is used); if both are given "
+            "this file must be byte-identical (sha256) to the manifest's FCIDUMP, e.g. a copy on "
+            "the cluster."
+        ),
         title="FCIDump File",
+    )
+
+    active_space_manifest: str | None = Field(
+        default=None,
+        description=(
+            "A path to an AVAS active-space manifest JSON (output of plugins/bs_uno_avas, "
+            "manifest schema v1): FCIDUMP + per-orbital AO labels + alpha/beta 1-RDM + spin "
+            "pattern of the selected broken-symmetry UHF. With method='uhf' the BS-UHF reference "
+            "is rebuilt from it (RDM start, label/spin-pattern start as fallback and check) "
+            "instead of the default / FE4S4_AF_GROUPS guesses. With method='rhf' only its "
+            "FCIDUMP is used (warning)."
+        ),
+        title="Active-Space Manifest",
     )
 
     sqd_dim: int = Field(
@@ -536,3 +555,12 @@ class FlowParameters(BaseModel):
         ),
         title="OO Re-fire Every Trial",
     )
+
+    @model_validator(mode="after")
+    def _fcidump_source(self) -> "FlowParameters":
+        # Only presence is checked here; the manifest itself (files, hashes, fcidump match) is
+        # validated where it is loaded (compute_molecular_integrals_from_fcidump), so a params
+        # JSON can be validated on a machine that does not hold the files.
+        if not self.fcidump and not self.active_space_manifest:
+            raise ValueError("one of 'fcidump' or 'active_space_manifest' must be given")
+        return self

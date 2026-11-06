@@ -196,4 +196,4 @@ against a real PySCF calculation on real molecules (not synthetic data).
 `--af-groups fe4s4` is a convenience keyword for the pairing-(1,2) reference used throughout this
 work (`up={fe1,fe2}`, `down={fe3,fe4}`, full polarization). To try a different pairing or a
 different molecule entirely, pass your own JSON (or `@path/to/file.json`) -- see
-`docs/tutorials/run_uhf_bsuhf_any_molecule.md` Step 1 for the fragment-spec schema.
+`docs/tutorials/run_bs_uhf_sqd_advanced_roquo.md` §7 for the fragment-spec schema.
