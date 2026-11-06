@@ -259,6 +259,7 @@ algorithms/sbd/native/diag_uhf
 algorithms/sbd/native/*.out
 algorithms/sbd/native/*.err
 algorithms/sbd/native/*.bak*
+algorithms/sbd/native/smoke/
 algorithms/sbd/native/wedge_backtrace_*.txt
 # One-off investigation build-script variants + probes from the 2026-08 ROQUO container/OMP
 # investigation -- the two production-relevant recipes (build_sbd_mpi_uhf_hpcx250.sh,

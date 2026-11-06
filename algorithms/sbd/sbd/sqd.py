@@ -11,7 +11,6 @@ from typing import Any
 import os
 import numpy as np
 from prefect import get_run_logger, task
-from prefect.variables import Variable
 from prefect_qiskit import QuantumRuntime
 from qcsc_workflow_utility.chem import ElectronicProperties, NpStrict1DArrayF64
 from qiskit.primitives.containers import BitArray
@@ -24,7 +23,7 @@ from qiskit_addon_sqd.configuration_recovery import (
 from qiskit_addon_sqd.counts import bit_array_to_arrays, generate_bit_array_uniform
 
 from .data_io import load_ndarray, save_ndarray
-from .flow_params import CircuitParameters
+from .flow_params import CircuitParameters, SamplerParameters
 from .lucj import create_lucj_circuit
 from .np_type_extension import (
     NpStrict1DArrayLL,
@@ -308,6 +307,7 @@ def walker_sqd(
     recomb_boost: bool = False,
     recomb_max_parents: int = 250,
     carryover_b: NpStrict2DArrayBool | None = None,
+    sampler_params: SamplerParameters | None = None,
 ) -> tuple[
     tuple[float, tuple[NpStrict2DArrayBool, NpStrict2DArrayBool | None], "SBDResult | None"],
     dict[str, Any],
@@ -333,7 +333,8 @@ def walker_sqd(
         "walker_index": walker_index,
     }
 
-    options = Variable.get("sqd_options", default={"params": {"shots": 100_000}})
+    # Sampling options come from FlowParameters.sampler (formerly the Prefect Variable sqd_options).
+    sampler_params = sampler_params or SamplerParameters()
     runtime = None
 
     if quantum_source == "real-device":
@@ -426,16 +427,11 @@ def walker_sqd(
             )
         # Shot batching: reach a large effective shot count by submitting K smaller sampler jobs
         # and mixing them, instead of one huge job (which times out / can exceed IBM's per-job
-        # cap). n_shot_batches lives at the TOP LEVEL of the options dict (not inside params, which
-        # hits the IBM REST schema). K=1 (default) is byte-for-byte the original single submission.
-        total_shots = int(options.get("params", {}).get("shots", 100_000))
-        n_shot_batches = max(1, int(options.get("n_shot_batches", 1)))
+        # cap). K=1 (default) is a single submission.
+        total_shots = int(sampler_params.shots)
+        n_shot_batches = max(1, int(sampler_params.n_shot_batches))
         per_batch_shots = max(1, total_shots // n_shot_batches)
-
-        # Per-call options must carry only the IBM params; strip the harness-only n_shot_batches.
-        batch_options = {k: v for k, v in options.items() if k != "n_shot_batches"}
-        batch_options = {**batch_options, "params": {**batch_options.get("params", {})}}
-        batch_options["params"]["shots"] = per_batch_shots
+        batch_options = sampler_params.runtime_options(shots=per_batch_shots)
 
         logger.info(
             "Submitting sampler workload to %s (shots=%s = %d batch(es) x %d).",
@@ -531,14 +527,14 @@ def walker_sqd(
             logger.exception("[persist] failed to save merged sample pool (continuing).")
     elif quantum_source == "saved":
         # Reload a previously persisted merged pool and diagonalize from it — no IBM call, no
-        # credentials. options["saved_samples"] is a per-walker list of saved-artifact paths (the
+        # credentials. sampler.saved_samples is a per-walker list of saved-artifact paths (the
         # file://... or S3 keys returned by the persist step above).
-        saved_paths = options.get("saved_samples")
+        saved_paths = list(sampler_params.saved_samples)
         if not saved_paths:
             raise RuntimeError(
-                "quantum_source='saved' but no saved_samples path (got "
-                f"{saved_paths!r}). Set --saved-samples-dir / SBD_SAVED_SAMPLES_DIR to the "
-                "persisted pool(s)."
+                "quantum_source='saved' but FlowParameters.sampler.saved_samples is empty. Set it "
+                "to the persisted pool path(s) (an absolute path or file://..., from the sampling "
+                "run's [persist] line)."
             )
         # One pool per walker when provided; otherwise all walkers reuse the same saved pool. A
         # reused saved sample is the molecule's single sampled distribution -- differential-evolution
@@ -563,7 +559,7 @@ def walker_sqd(
         )
         logger.info("Sampling bitstrings with RNG seed %s", seed)
         bit_array = generate_bit_array_uniform(
-            num_samples=options.get("params", {}).get("shots", 100_000),
+            num_samples=int(sampler_params.shots),
             num_bits=elec_props.num_orbitals * 2,
             rand_seed=seed,
         )

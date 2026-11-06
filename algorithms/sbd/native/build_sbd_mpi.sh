@@ -1,5 +1,4 @@
 #!/bin/bash
-#SBATCH --account=q0000219
 #SBATCH --partition=roquo
 #SBATCH --gres=gpu:1
 #SBATCH --time=01:00:00

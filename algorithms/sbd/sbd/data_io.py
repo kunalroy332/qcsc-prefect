@@ -37,6 +37,14 @@ def _flow_scoped_subdir() -> str:
 
 
 def _local_storage_dir() -> Path:
+    """Local fallback for persisted arrays (sample pools, SQD reports).
+
+    ``SBD_LOCAL_STORAGE_DIR`` overrides it, e.g. one directory per run when PREFECT_HOME must stay
+    the user's own (Prefect Cloud profile). Default: ``$PREFECT_HOME/storage``.
+    """
+    override = os.environ.get("SBD_LOCAL_STORAGE_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
     settings = get_current_settings()
     return Path(settings.home) / "storage"
 
@@ -79,13 +87,27 @@ def save_ndarray(
     return f"file://{local_path}"
 
 
+def _local_path(file_path: str) -> str | None:
+    """The local file a saved-artifact path names, or None for an S3 key.
+
+    Local: ``file://<path>``, an absolute or ``~`` path, or any existing file. S3 keys are
+    bucket-relative, so a plain absolute path (e.g. typed into saved_samples) never goes to S3.
+    """
+    if file_path.startswith("file://"):
+        return file_path[len("file://") :]
+    path = os.path.expanduser(file_path)
+    if os.path.isabs(path) or os.path.isfile(path):
+        return path
+    return None
+
+
 def load_ndarray(
     file_path: str,
     key: str,
 ) -> np.ndarray:
     # --- Local ---
-    if file_path.startswith("file://"):
-        local_path = file_path[len("file://") :]
+    local_path = _local_path(file_path)
+    if local_path is not None:
         with open(local_path, "rb") as f:
             data = f.read()
         with io.BytesIO(data) as buf:
@@ -95,7 +117,13 @@ def load_ndarray(
         return arr
 
     # --- S3 (backward compatible) ---
-    s3_client = S3Bucket.load("s3-sqd")
+    try:
+        s3_client = S3Bucket.load("s3-sqd")
+    except Exception as exc:
+        raise FileNotFoundError(
+            f"{file_path}: not a local file and no 's3-sqd' block to read it from S3 "
+            "(local pools: an absolute path or file://<path>)"
+        ) from exc
     with io.BytesIO() as buf:
         s3_client.download_object_to_file_object(file_path, buf)
         buf.seek(0)

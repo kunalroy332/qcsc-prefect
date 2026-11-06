@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=fe4s4-rhf-sample
-#SBATCH --account=q0000219
 #SBATCH --partition=roquo
 #SBATCH --gres=gpu:1
 #SBATCH --time=03:00:00

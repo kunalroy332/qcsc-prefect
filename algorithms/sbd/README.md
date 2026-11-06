@@ -125,7 +125,13 @@ This creates:
 - `ExecutionProfileBlock` (default: `exec-sbd-mpi` for Miyabi, `exec-sbd-fugaku` for Fugaku)
 - `HPCProfileBlock` (default: `hpc-miyabi-sbd` for Miyabi, `hpc-fugaku-sbd` for Fugaku)
 - `SBD Solver Job` block (default: `davidson-solver`)
-- Prefect Variable `sqd_options`
+
+Sampling options are flow parameters (`FlowParameters.sampler`), not a Prefect Variable:
+`shots` (default 10 000), `n_shot_batches`, `dynamical_decoupling` / `dd_sequence`,
+`measure_twirling`, `gate_twirling`, `saved_samples`. `create_blocks.py` no longer accepts
+`--shots`, `--n-shot-batches`, `--saved-samples`, `--sqd-options-json`, `--options-variable-name`,
+the DD / twirling flags or their `SBD_*` / config equivalents; it stops with a pointer to the
+parameter instead.
 
 ## Run flow
 
@@ -139,6 +145,8 @@ Note:
 - The example JSON files use intentionally low `circ_params.sabre_layout_trials` values so Fugaku runs do not appear stuck in SABRE layout search before IBM Quantum submission.
 - These are conservative starting points only. Tune them for your own backend, qubit count, and circuit specification.
 - Set `"quantum_source": "random"` in the JSON if you want to skip IBM Quantum Runtime and use deterministic pseudo-random bitstrings instead. `"random_seed"` controls reproducibility in that mode.
+- Shots and error mitigation: `"sampler": {"shots": 50000, "dynamical_decoupling": true, "measure_twirling": true}`.
+- `FlowParameters` rejects unknown keys.
 
 Deploy entrypoint:
 

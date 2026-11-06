@@ -2,8 +2,8 @@
 
 The real-device path in walker_sqd submits K sampler jobs of shots//K each and mixes them, to
 reach a large effective shot count without one huge IBM job. These tests pin the merge contract:
-shots sum, the unique-config pool grows, probabilities normalize, and the harness-only
-``n_shot_batches`` key is stripped from the per-batch options sent to IBM.
+shots sum, the unique-config pool grows, probabilities normalize, and only the IBM params
+(``SamplerParameters.runtime_options``) are sent per batch.
 """
 
 from __future__ import annotations
@@ -33,22 +33,19 @@ def test_concatenate_shots_sums_and_enriches():
     assert bit_array_to_arrays(batches[0])[0].shape[0] == b0.shape[0]
 
 
-def test_per_batch_options_strip_harness_key():
-    # Mirror walker_sqd's option split: divide shots, strip n_shot_batches, keep params.
-    options = {
-        "params": {"shots": 5_000_000, "options": {"twirling": {"enable_measure": True}}},
-        "n_shot_batches": 5,
-    }
-    total = int(options.get("params", {}).get("shots", 0))
-    k = max(1, int(options.get("n_shot_batches", 1)))
-    per = max(1, total // k)
-    batch_options = {key: val for key, val in options.items() if key != "n_shot_batches"}
-    batch_options = {**batch_options, "params": {**batch_options.get("params", {})}}
-    batch_options["params"]["shots"] = per
+def test_per_batch_runtime_options():
+    """walker_sqd splits SamplerParameters.shots over n_shot_batches; only IBM params are sent."""
+    from sbd.flow_params import SamplerParameters
 
-    assert "n_shot_batches" not in batch_options  # never sent to the IBM REST schema
+    sp = SamplerParameters(shots=5_000_000, n_shot_batches=5, measure_twirling=True)
+    per = max(1, sp.shots // sp.n_shot_batches)
+    batch_options = sp.runtime_options(shots=per)
+
+    assert set(batch_options) == {"params"}  # no harness-only keys reach the IBM REST schema
     assert batch_options["params"]["shots"] == 1_000_000
-    assert batch_options["params"]["options"] == {"twirling": {"enable_measure": True}}
+    assert batch_options["params"]["options"] == {
+        "twirling": {"enable_gates": False, "enable_measure": True}
+    }
 
 
 def test_saved_pool_roundtrip_reconstructs_bitarray():

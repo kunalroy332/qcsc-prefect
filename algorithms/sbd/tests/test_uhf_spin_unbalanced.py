@@ -919,10 +919,7 @@ def _e2e(
     else:
         monkeypatch.delenv("FE4S4_CKPT_DIR", raising=False)
     monkeypatch.setattr(sqd.SBDSolverJob, "load", staticmethod(lambda name: solver))
-    monkeypatch.setattr(
-        sqd.Variable, "get", staticmethod(lambda *a, **k: {"params": {"shots": 400}})
-    )
-    from sbd.flow_params import CircuitParameters
+    from sbd.flow_params import CircuitParameters, SamplerParameters
 
     return sqd.walker_sqd.fn(
         trial_index=0,
@@ -940,6 +937,7 @@ def _e2e(
         random_seed=1,
         n_recovery_steps=n_steps,
         n_batches=1,
+        sampler_params=SamplerParameters(shots=400),
     )
 
 

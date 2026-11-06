@@ -12,9 +12,28 @@
 #include "sbd/sbd.h"
 #include "mpi.h"
 
+#if defined(SBD_THRUST) && defined(__CUDACC__)
+#include <cuda_runtime.h>
+#include <cstdlib>
+#endif
 
 
 int main(int argc, char * argv[]) {
+
+#if defined(SBD_THRUST) && defined(__CUDACC__)
+  // One GPU per MPI rank on a node: the launcher starts ranks that all see every GPU of the
+  // node, so pick device (node-local rank) % (#GPUs) BEFORE MPI_Init, so that MPI / NCCL set up
+  // their CUDA context on that device. SLURM_LOCALID (srun) or OMPI_COMM_WORLD_LOCAL_RANK
+  // (mpirun) is the node-local rank; without either (a single rank) this is GPU 0, as before.
+  {
+    const char* local = std::getenv("SLURM_LOCALID");
+    if( local == nullptr ) local = std::getenv("OMPI_COMM_WORLD_LOCAL_RANK");
+    int num_devices = 0;
+    if( cudaGetDeviceCount(&num_devices) == cudaSuccess && num_devices > 0 ) {
+      cudaSetDevice((local != nullptr ? std::atoi(local) : 0) % num_devices);
+    }
+  }
+#endif
 
   int provided;
   int mpi_ierr = MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
@@ -23,6 +42,15 @@ int main(int argc, char * argv[]) {
   int mpi_master = 0;
   int mpi_rank; MPI_Comm_rank(comm,&mpi_rank);
   int mpi_size; MPI_Comm_size(comm,&mpi_size);
+
+#if defined(SBD_THRUST) && defined(__CUDACC__)
+  if( mpi_size > 1 ) {
+    int device = -1;
+    cudaGetDevice(&device);
+    std::cout << "[gpu] rank " << mpi_rank << "/" << mpi_size << " uses CUDA device " << device
+              << std::endl;
+  }
+#endif
 
   auto sbd_data = sbd::tpb::generate_sbd_data(argc,argv);
 

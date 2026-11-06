@@ -130,13 +130,48 @@ SYSLIB="-lblas -llapack" \
 
 ## Building the Multi-GPU (NCCL) Executable on ROQUO (GB200)
 
-`build_sbd_gpu.sh` produces a **single-GPU** binary (`-cuda -gpu=mem:unified -DSBD_THRUST`, no NCCL,
-no multi-rank path). To split the Davidson diagonalization across multiple GPUs (so subspace
-dimensions that a single GPU's HBM cannot hold, e.g. `sqd_dim = 1e9`, become tractable), build the
-**NCCL multi-GPU** binaries with `build_sbd_mpi.sh` (RHF) and `build_sbd_mpi_uhf.sh` (UHF). These
-target a fork that adds the multi-rank / non-CUDA-aware-MPI support the upstream tree lacks.
+**Current recipe (2026-11): `MPI=1 UHF=1 bash build_sbd_gpu.sh`** builds
+`diag-gpu_uhf-mpi-hpcx250` from the same `main.cc` and upstream `native/sbd/` checkout as the
+1-GPU `diag-gpu_uhf`. No cmake, no fork, no hand-applied patches. Check both binaries with
+`sbatch --account=$ACCT smoke_gpu.sh` (one node, 4 GPUs; see its header).
 
-Two build recipes are proven and tracked in this repo — pick one:
+- **Source:** upstream `r-ccs-cms/sbd` `main` now has what the fork + patches below provided:
+  - NCCL helpers (`framework/nccl_utility.h`, warm-up buffers of length 1);
+  - host-staged MPI (`SBD_NON_CUDA_AWARE_MPI`);
+  - PR79 (GetTotalD deadlock with a 1-rank `h_comm`) and PR84 (GenerateExcitation livelock),
+    both merged 2026-08-28.
+
+  The script checks for PR79, PR84 and the NCCL helpers, and stops if the checkout predates
+  them.
+- **Defines:** `-DSBD_USE_NCCL -DSBD_NON_CUDA_AWARE_MPI -DSBD_THRUST_SAFE_MPI_ALLREDUCE
+  -DSBD_USE_RANK_DISTRIBUTION -DSBD_USE_BLOCK_RANK_DISTRIBUTION`. These are the options of the
+  cmake recipe below, except cuBLAS; upstream's CMake turns them into the same defines.
+- **No cuBLAS (`-DSBD_USE_CUBLAS`)**: upstream `main` (2026-10, `DavidsonCublas` from PRs
+  #95 / #99) does not compile with it. `subspace_thrust.h` and `cublas_utility.h` both define
+  `sbd::raw_ptr`, and `DavidsonCublas` passes `device_vector`s to `Determine_kernel`, which takes
+  raw pointers. First ROQUO build, 2026-11-02: 3 errors.
+
+  Without it, `Davidson` runs `DavidsonImpl`, which still sums across ranks with NCCL; the cuBLAS
+  version is a speed-up, not needed for correctness. `CUBLAS=1` adds it back (with
+  `-cudalib=cublas`) once upstream fixes it.
+- **Linking:** NCCL from the NVIDIA HPC SDK (`comm_libs`, with an rpath).
+- **MPI:** `mpic++` from `hpcx/2.50` (OpenMPI 5), loaded after `nvhpc/26.5`. Ranks are launched
+  with `srun --mpi=pmix`.
+- **GPU per rank:** `main.cc` picks its GPU before `MPI_Init` as node-local rank (`SLURM_LOCALID`)
+  % number of GPUs, and with more than one rank it prints `[gpu] rank r/n uses CUDA device d`.
+  Every rank must see all GPUs of the node, so the launcher passes no `--gpu-bind`.
+
+The cmake recipes below are the older route (fork `rwakizaka/sbd@non-cuda-aware-mpi` + patches).
+They are kept for reference; `build_sbd_mpi_uhf_hpcx250.sh` still assumes `$HOME/qcsc-prefect`
+and a cmake module, which ROQUO no longer has.
+
+`build_sbd_gpu.sh` without `MPI=1` produces a **single-GPU** binary (`-cuda -gpu=mem:unified
+-DSBD_THRUST`, no NCCL). To split the Davidson diagonalization across multiple GPUs (so subspace
+dimensions that a single GPU's HBM cannot hold, e.g. `sqd_dim = 1e9`, become tractable), build the
+**NCCL multi-GPU** binary (above, or `build_sbd_mpi.sh` (RHF) / `build_sbd_mpi_uhf.sh` (UHF) on the
+fork).
+
+Two older build recipes are tracked in this repo:
 
 - **`build_sbd_mpi_uhf_hpcx250.sh`** (native, recommended default): links against the standalone
   `hpcx/2.50` module (HPC-X OpenMPI 5), *not* NVHPC's own bundled `comm_libs/hpcx` and *not*

@@ -1,7 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=rebuild-venv
-#SBATCH --account=qc-prj-other02
-#SBATCH --reservation=large-20260824
 #SBATCH --partition=roquo
 #SBATCH --gres=gpu:1
 #SBATCH --time=01:00:00
@@ -10,14 +8,14 @@
 #
 # Rebuild the sbd venv after ROQUO's storage migration (2026-08-28).
 #
-# WHY: the migration moved $HOME from /home/q0000219 -> /home/nfs1/q0000219, and a venv bakes
+# WHY: the migration moved $HOME from /home/<user> -> /home/nfs1/<user>, and a venv bakes
 # absolute paths in three places, ALL of which broke:
 #   1. 46 of 54 console scripts in .venv/bin/ have a hardcoded shebang:
-#        #!/home/q0000219/qcsc-prefect/algorithms/sbd/.venv/bin/python
+#        #!/home/<user>/qcsc-prefect/algorithms/sbd/.venv/bin/python
 #      -> "bad interpreter: No such file or directory". This is why `prefect` appeared to be
 #      "not found" (execvp reports ENOENT for a bad INTERPRETER, which reads as a missing exe).
 #   2. .venv/bin/python symlinked -> /usr/bin/python3.12 (fine on compute, ABSENT on login).
-#   3. editable-install .pth / _finder.py files point into the old /home/q0000219 tree, so
+#   3. editable-install .pth / _finder.py files point into the old /home/<user> tree, so
 #      qcsc_prefect_* and sbd all fail to import.
 # None of these are fixable with env vars, hence a real rebuild.
 #
@@ -58,7 +56,7 @@ echo "=== verify: the three things that were broken ==="
 FAIL=0
 
 echo "--- 1. shebangs point at the NEW home ---"
-BAD=$(grep -l '/home/q0000219' "$SBD/.venv/bin/"* 2>/dev/null | wc -l)
+BAD=$(grep -l "/home/$USER/" "$SBD/.venv/bin/"* 2>/dev/null | wc -l)  # old home path
 echo "scripts still referencing the dead path: $BAD (must be 0)"
 [ "$BAD" -eq 0 ] || FAIL=1
 

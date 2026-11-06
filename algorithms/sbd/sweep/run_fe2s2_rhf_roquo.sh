@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=fe2s2-rhf
-#SBATCH --account=q0000219
 #SBATCH --partition=roquo
 #SBATCH --gres=gpu:1
 #SBATCH --time=02:00:00
@@ -12,7 +11,7 @@
 #
 # Real device:   sbatch run_fe2s2_rhf_roquo.sh
 # Dry-run (no IBM):  FE2S2_QSRC=random sbatch run_fe2s2_rhf_roquo.sh
-# Interactive:   srun --account=q0000219 --partition=roquo --gres=gpu:1 --time=02:00:00 \
+# Interactive:   srun --account=$ACCT --partition=roquo --gres=gpu:1 --time=02:00:00 \
 #                    bash run_fe2s2_rhf_roquo.sh
 set -euo pipefail
 
