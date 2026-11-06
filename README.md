@@ -148,6 +148,7 @@ See [DICE Integration](./docs/howto/howto_use_dice_prefect.md) for a longer setu
   - [Native Qiskit on Prefect](./docs/howto/howto_use_native_qiskit_prefect.md)
   - [Miyabi Hello Demo](./examples/miyabi_prefect_hello_demo/README.md)
   - [Fugaku Hello Demo](./examples/fugaku_prefect_hello_demo/README.md)
+  - [Run BS-UNO-AVAS on ROQUO](./docs/tutorials/run_bs_uno_avas_roquo.md)
 
 ## Code Management
 

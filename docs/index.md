@@ -10,6 +10,8 @@ multiple HPC systems by switching reusable execution blocks.
 - Step-by-step tutorials for Miyabi and Fugaku in
   [Tutorials](./tutorials/create_qcsc_workflow_for_miyabi.md)
 - Operational setup guides in [How-to](./howto/howto_setup_prefect_qiskit.md)
+- BS-UNO-AVAS active spaces for Fe–S clusters on ROQUO in
+  [Run BS-UNO-AVAS on ROQUO](./tutorials/run_bs_uno_avas_roquo.md)
 
 ## Repository Layout
 

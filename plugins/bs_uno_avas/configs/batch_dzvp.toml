@@ -1,0 +1,39 @@
+# Batch config for many PDB excerpts: the PDB comes from --pdb (roquo/run_pdb.sh),
+# each job runs one state. Output: output/<pdb stem>_E<state>_R<geometry>_S<tag>/.
+# R = [output] geometry_label (--geometry, GEOMETRY= for run_pdb.sh), default pdb.
+[structure]
+# cluster_resname = "FES"    # only for a name other than FES / SF4 (or --cluster-resname)
+protonate = "check"
+sg_cutoff = 3.3
+his = "HIE"
+
+[states.ox]                  # Fe2S2: [Fe2S2]2+ (2 Fe(III)); Fe4S4: [Fe4S4]2+ (2 Fe(III))
+[states.red]                 # Fe2S2: [Fe2S2]+ (1 Fe(III)); Fe4S4: [Fe4S4]+ (1 Fe(III))
+
+[scf]
+engine = "auto"
+method = "uhf"
+basis = "dzvp"
+auxbasis = "def2-universal-jkfit"
+guesses = ["minao", "atom"]
+patterns = "auto"
+mirrors = true
+stability = "internal"
+n_stability = 3
+threads = 0
+max_memory_mb = 200000
+max_cycle = 200
+selection = "lowest"
+
+[avas]
+target_aos = "file:AOs"
+noon_threshold = 0.2
+min_frac_weight = 0.5
+labels = "polar"
+eri = "auto"
+tag_mismatch = "error"       # error | use-active (see docs/REFERENCE.md §1)
+
+[output]
+dir = "output"
+work_dir = "work/bs_uno_avas"
+run_name = "{stem}_E{E}_R{R}_S{S}"

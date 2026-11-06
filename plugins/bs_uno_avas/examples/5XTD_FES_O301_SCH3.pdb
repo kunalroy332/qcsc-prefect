@@ -1,0 +1,29 @@
+REMARK   1 [Fe2S2(SCH3)4] model of FES O301 in PDB 5XTD (human complex I, cryo-EM 3.7 A).
+REMARK   1 Fe2S2 core as deposited. Each Cys is replaced by S-CH3: S placed 2.30 A from Fe
+REMARK   1 along Fe->SG, C 1.82 A from S along SG->CB, 3 H at 1.09 A (tetrahedral).
+REMARK   1 Formal charge: -2 for [Fe2S2]2+ (oxidized), -3 for [Fe2S2]+ (reduced).
+HETATM    1 FE1  FES O 301     195.538 129.818 358.008  1.00  0.00          FE
+HETATM    2 FE2  FES O 301     197.325 130.265 360.484  1.00  0.00          FE
+HETATM    3 S1   FES O 301     195.219 130.645 360.014  1.00  0.00           S
+HETATM    4 S2   FES O 301     197.646 129.445 358.472  1.00  0.00           S
+ATOM      5 SG   CYS O 135     193.361 129.085 358.125  1.00  0.00           S
+ATOM      6 CB   CYS O 135     193.506 130.673 357.247  1.00  0.00           C
+ATOM      7 HB1  CYS O 135     192.518 131.002 356.925  1.00  0.00           H
+ATOM      8 HB2  CYS O 135     193.938 131.419 357.914  1.00  0.00           H
+ATOM      9 HB3  CYS O 135     194.149 130.549 356.375  1.00  0.00           H
+ATOM     10 SG   CYS O 140     194.972 127.617 358.363  1.00  0.00           S
+ATOM     11 CB   CYS O 140     194.682 126.981 356.683  1.00  0.00           C
+ATOM     12 HB1  CYS O 140     194.403 125.928 356.736  1.00  0.00           H
+ATOM     13 HB2  CYS O 140     193.877 127.547 356.214  1.00  0.00           H
+ATOM     14 HB3  CYS O 140     195.592 127.086 356.092  1.00  0.00           H
+ATOM     15 SG   CYS O 176     198.378 132.075 359.532  1.00  0.00           S
+ATOM     16 CB   CYS O 176     197.747 132.578 357.901  1.00  0.00           C
+ATOM     17 HB1  CYS O 176     198.311 133.439 357.543  1.00  0.00           H
+ATOM     18 HB2  CYS O 176     197.857 131.753 357.198  1.00  0.00           H
+ATOM     19 HB3  CYS O 176     196.693 132.844 357.986  1.00  0.00           H
+ATOM     20 SG   CYS O 180     199.472 129.440 360.443  1.00  0.00           S
+ATOM     21 CB   CYS O 180     199.645 127.839 361.291  1.00  0.00           C
+ATOM     22 HB1  CYS O 180     200.682 127.508 361.234  1.00  0.00           H
+ATOM     23 HB2  CYS O 180     199.356 127.948 362.336  1.00  0.00           H
+ATOM     24 HB3  CYS O 180     199.002 127.102 360.810  1.00  0.00           H
+END

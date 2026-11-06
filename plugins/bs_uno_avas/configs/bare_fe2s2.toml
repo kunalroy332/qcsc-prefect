@@ -1,0 +1,20 @@
+# Bare [Fe2S2] (cluster atoms of the SCH3 PDB only; red +1, ox +2): local CPU demo, ~30 s.
+# PDB: --pdb examples/5XTD_FES_O301_SCH3.pdb (from plugins/bs_uno_avas/).
+[structure]
+cluster_only = true
+
+[states.red]
+n_fe3 = 1
+[states.ox]
+n_fe3 = 2
+
+[scf]
+engine = "cpu"
+basis = "dzvp"
+
+[avas]
+target_aos = "file:AOs"
+
+[output]
+work_dir = "work/bs_uno_avas_demo"
+run_name = "bare_Fe2S2_E{E}_Rpdb_S{S}"

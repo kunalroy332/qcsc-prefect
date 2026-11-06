@@ -1,0 +1,6 @@
+# run files (inputs, output, chkfiles, logs): workspace/, see workspace/README.md
+workspace/*
+!workspace/README.md
+
+# orbital cube files from tools/make_aos.py (~7 MB each, visualization only; regenerate locally)
+*.cube

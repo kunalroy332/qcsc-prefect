@@ -1,0 +1,34 @@
+# fchk route (cli check-fchk / build-fchk): Gaussian UB3PW91/DGDZVP broken-symmetry fchk files
+# (<site>_BS_OPT.fchk; optimized, capped geometry), used by roquo/run_fchk.sh. Every key is
+# optional (defaults: fchk_route.DEFAULTS); only max_memory_mb differs, for a whole ROQUO node.
+# Relative paths resolve against the workspace (plugins/bs_uno_avas/workspace/).
+
+[cluster]
+fe_s_cutoff = 2.6      # A: bridging S = S within this distance of >= 2 Fe
+
+[gate]
+min_fe = 2.5           # |alpha - beta| per Fe (meta-Lowdin); BS-DFT moments are below UHF ones
+max_s = 1.2            # per bridging S
+
+[check]
+energy = true          # PySCF B3PW91 energy of the fchk density vs the fchk Total Energy
+e_tol = 2e-3           # Eh (grid / DF / functional details differ; a wrong mapping is off by Eh)
+s2_tol = 1e-4
+orth_tol = 1e-6
+
+[scf]
+auxbasis = "def2-universal-jkfit"   # energy check and DF active-space integrals (nao > 600)
+grid_level = 3
+threads = 0            # 0: OMP_NUM_THREADS
+max_memory_mb = 200000   # MB; whole node (run_fchk.sh submits --exclusive), as batch_dzvp
+
+[avas]
+target_aos = "file:AOs"   # dzvp free-atom targets, projected onto the fchk basis
+noon_threshold = 0.2
+min_frac_weight = 0.5
+labels = "polar"
+eri = "auto"
+
+[output]
+dir = "output"
+run_name = "{stem}_E{E}_R{R}_S{S}_BS_OPT"

@@ -1,0 +1,45 @@
+# Fast production mode of batch_dzvp.toml (preliminary results, see docs/REFERENCE.md §4):
+# - cut points of the excerpt capped with H (else they are radicals in the SCF)
+# - no high-spin SCF: BS-UHF from an atomic BS guess (a converged high-spin chkfile is used if
+#   present; high-spin route as fallback when the atomic guess misses the pattern or gives a
+#   ligand radical)
+# - Fe2S2: pattern 01 (+ 10 only at ms != 0, i.e. red); Fe4S4: lowest of the 3 pairings, no
+#   mirrors
+# - no full-system stability analysis (hours of CPU per pattern); the active-space UHF that is
+#   written as the reference is still stability-checked in verify
+[structure]
+# cluster_resname = "FES"    # only for a name other than FES / SF4 (or --cluster-resname)
+protonate = "cap"
+sg_cutoff = 3.3
+his = "HIE"
+
+[states.ox]                  # Fe2S2: [Fe2S2]2+ (2 Fe(III)); Fe4S4: [Fe4S4]2+ (2 Fe(III))
+[states.red]                 # Fe2S2: [Fe2S2]+ (1 Fe(III)); Fe4S4: [Fe4S4]+ (1 Fe(III))
+
+[scf]
+engine = "auto"
+method = "uhf"
+basis = "dzvp"
+auxbasis = "def2-universal-jkfit"
+guesses = ["minao", "atom"]  # fallback high-spin route only
+bs_guess = "atomic"
+patterns = { Fe2S2 = [[1, -1]], Fe4S4 = [[1, 1, -1, -1], [1, -1, 1, -1], [1, -1, -1, 1]] }
+mirrors = { Fe2S2 = "spin", Fe4S4 = false }
+stability = "off"
+threads = 0
+max_memory_mb = 600000       # DF tensor up to ~220 GB (dry run); whole node = 1.6 TB
+max_cycle = 200
+selection = "lowest"
+
+[avas]
+target_aos = "file:AOs"
+noon_threshold = 0.2
+min_frac_weight = 0.5
+labels = "polar"
+eri = "auto"
+tag_mismatch = "error"       # error | use-active (see docs/REFERENCE.md §1)
+
+[output]
+dir = "output"
+work_dir = "work/bs_uno_avas"
+run_name = "{stem}_E{E}_R{R}_S{S}"

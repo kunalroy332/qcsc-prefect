@@ -1,0 +1,17 @@
+# [Fe2S2(SCH3)4] model of 5XTD FES O301 (cluster + SCH3 caps, 24 atoms), UHF route.
+# PDB: --pdb examples/5XTD_FES_O301_SCH3.pdb (from plugins/bs_uno_avas/).
+[structure]
+
+[states.ox]
+n_fe3 = 2
+[states.red]
+n_fe3 = 1
+
+[scf]
+engine = "auto"
+basis = "dzvp"
+guesses = ["minao", "atom"]
+max_memory_mb = 16000
+
+[avas]
+target_aos = "file:AOs"

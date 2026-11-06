@@ -35,7 +35,7 @@ repos:
           - --confidence-level
           - medium
         language: system
-        files: ^(packages|algorithms)/.*\.py$
+        files: ^(packages|algorithms|plugins)/.*\.py$
         exclude: (^|/)(tests?/|test_.*\.py$)
 
       - id: detect-secrets
